@@ -1,0 +1,12 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.env
+*.log
+vite.config.js.timestamp-*.mjs
+.DS_Store
+.venv/
+venv/
+*.pyc
+__pycache__/
