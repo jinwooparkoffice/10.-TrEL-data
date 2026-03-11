@@ -11,11 +11,6 @@
   "scripts": {
     "dev": "vite",
     "dev:backend": "python app.py",
-    "dev:all": "powershell -ExecutionPolicy Bypass -File ./dev.ps1",
-    "dev:all:install": "powershell -ExecutionPolicy Bypass -File ./dev.ps1 -- -install",
-    "repair": "powershell -ExecutionPolicy Bypass -File ./repair.ps1",
-    "clean:install": "powershell -Command \"if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }; pnpm install\"",
-    "start": "powershell -ExecutionPolicy Bypass -File ./dev.ps1",
     "dev:all:direct": "pnpm dlx concurrently -n \"frontend,backend\" -c \"cyan,yellow\" \"pnpm dev\" \"pnpm dev:backend\"",
     "build": "vite build",
     "preview": "vite preview",
