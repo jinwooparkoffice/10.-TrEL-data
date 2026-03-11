@@ -1,4 +1,5 @@
 @echo off
+chcp 949 >nul
 REM TrEL Data 프로젝트 초기 설정 스크립트 (Windows)
 
 echo TrEL Data 프로젝트 설정을 시작합니다...

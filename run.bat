@@ -1,4 +1,5 @@
 @echo off
+chcp 949 >nul
 REM TrEL Data 프로젝트 실행 스크립트 (Windows)
 
 REM 가상환경 확인
