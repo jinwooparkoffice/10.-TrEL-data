@@ -10,25 +10,13 @@ TrEL 신호 처리 및 분석 자동화 도구
 ```bash
 pnpm install
 pip install -r requirements.txt
+pnpm dev:all
 ```
 
 **macOS / Linux**
 ```bash
 pnpm install
 python3 -m pip install -r requirements.txt
-```
-
-`pnpm install`만으로는 백엔드 Python 패키지가 설치되지 않으므로, 위 Python 의존성 설치는 1회 필요합니다.
-
-## 실행
-
-**Windows:**
-```bash
-pnpm dev:all
-```
-
-**Mac/Linux:**
-```bash
 pnpm dev:all:mac
 ```
 
