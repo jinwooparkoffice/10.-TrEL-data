@@ -33,6 +33,6 @@ pnpm dev:all:mac
 
 ## 플랫폼 호환성
 
-✅ Windows (PowerShell, CMD)  
-✅ macOS  
-✅ Linux
+Windows (PowerShell, CMD)  
+macOS  
+Linux
