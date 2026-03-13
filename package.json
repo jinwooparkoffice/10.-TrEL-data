@@ -11,7 +11,9 @@
   "scripts": {
     "dev": "vite",
     "dev:backend": "python app.py",
-    "dev:all:direct": "pnpm dlx concurrently -n \"frontend,backend\" -c \"cyan,yellow\" \"pnpm dev\" \"pnpm dev:backend\"",
+    "dev:backend:mac": "python3 app.py",
+    "dev:all": "pnpm dlx concurrently -n \"frontend,backend\" -c \"cyan,yellow\" \"pnpm dev\" \"pnpm dev:backend\"",
+    "dev:all:mac": "pnpm dlx concurrently -n \"frontend,backend\" -c \"cyan,yellow\" \"pnpm dev\" \"pnpm dev:backend:mac\"",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0"

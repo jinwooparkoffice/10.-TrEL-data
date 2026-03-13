@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-
-const API_ORIGIN = import.meta.env.VITE_API_ORIGIN || `${window.location.protocol}//${window.location.hostname}:8080`
-const apiUrl = (path) => `${API_ORIGIN}${path}`
+import { apiUrl } from './api'
+import { scanAnalysisFolder } from './fileUtils'
 
 function RisePreviewChart({ timeRaw, elSignal, tDelay, tSaturation }) {
   const w = 650
@@ -240,41 +239,67 @@ export default function AnalysisTab({ backendStatus }) {
   const [analysisPreview, setAnalysisPreview] = useState(null)
   const [analysisError, setAnalysisError] = useState(null)
   const [analysisProcessing, setAnalysisProcessing] = useState(false)
+  const [analysisSelectingFolder, setAnalysisSelectingFolder] = useState(false)
+  const [analysisScanningFolder, setAnalysisScanningFolder] = useState(false)
   const [analysisDone, setAnalysisDone] = useState(false)
   const analysisAbortRef = useRef(null)
 
-  const collectFiles = async (dir, prefix, filter) => {
-    const list = []
-    for await (const [name, handle] of dir.entries()) {
-      const relPath = prefix ? `${prefix}/${name}` : name
-      if (handle.kind === 'file' && filter(name)) {
-        list.push({ name, relPath, file: await handle.getFile() })
-      } else if (handle.kind === 'directory') {
-        list.push(...await collectFiles(handle, relPath, filter))
-      }
+  const loadAnalysisPreview = async (fileHandle) => {
+    const fd = new FormData()
+    fd.append('file', await fileHandle.getFile())
+    fd.append('low_pct', lowPct)
+    fd.append('high_pct', highPct)
+    fd.append('n_decay', nDecay)
+    fd.append('decay_fit_start_us', decayFitStartUs)
+
+    const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
+    const data = await res.json()
+
+    if (!data.success) {
+      throw new Error(data.error || '미리보기 로드 실패')
     }
-    return list
+
+    setAnalysisPreview(data)
+  }
+
+  const ensureReadWritePermission = async (dirHandle) => {
+    const options = { mode: 'readwrite' }
+    if ((await dirHandle.queryPermission(options)) === 'granted') {
+      return true
+    }
+    return (await dirHandle.requestPermission(options)) === 'granted'
   }
 
   const handleAnalysisFolderSelect = async () => {
+    if (analysisSelectingFolder) return
     if (!('showDirectoryPicker' in window)) {
       setAnalysisError('이 브라우저는 폴더 선택을 지원하지 않습니다.')
       return
     }
+
+    let dirHandle
+    try {
+      setAnalysisSelectingFolder(true)
+      dirHandle = await window.showDirectoryPicker({ id: 'trel-analysis-folder' })
+    } catch (err) {
+      setAnalysisSelectingFolder(false)
+      if (err.name === 'AbortError') return
+      setAnalysisPreview(null)
+      setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
+      setAnalysisFolderReady(false)
+      return
+    }
+
     setAnalysisError(null)
     setAnalysisPreview(null)
     setAnalysisDone(false)
     try {
-      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
-      const files = await collectFiles(dirHandle, '', n =>
-        !n.startsWith('._') && n.endsWith('.csv') && (n.includes('_TrEL') || n.includes('TrEL'))
-      )
-      const vilFiles = await collectFiles(dirHandle, '', n =>
-        !n.startsWith('._') &&
-        (n.endsWith('.csv') || n.endsWith('.xlsx')) &&
-        n.toUpperCase().includes('VIL') &&
-        n.includes('_processed')
-      )
+      setAnalysisSelectingFolder(false)
+      setAnalysisScanningFolder(true)
+
+      const scanned = await scanAnalysisFolder(dirHandle)
+      const files = scanned.analysisFiles
+      const vilFiles = scanned.analysisVilFiles
       if (files.length === 0) {
         setAnalysisError('TrEL 형식 CSV 파일이 없습니다. (_TrEL.csv 또는 TrEL_processed 내 파일)')
         setAnalysisFolderReady(false)
@@ -284,42 +309,22 @@ export default function AnalysisTab({ backendStatus }) {
       setAnalysisVilFiles(vilFiles)
       setAnalysisDirHandle(dirHandle)
       setAnalysisFolderReady(true)
-      const fd = new FormData()
-      fd.append('file', files[0].file)
-      fd.append('low_pct', lowPct)
-      fd.append('high_pct', highPct)
-      fd.append('n_decay', nDecay)
-      fd.append('decay_fit_start_us', decayFitStartUs)
-      const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
-      const data = await res.json()
-      if (data.success) {
-        setAnalysisPreview(data)
-      } else {
-        setAnalysisPreview(null)
-        setAnalysisError(data.error || '미리보기 로드 실패')
-      }
     } catch (err) {
-      if (err.name === 'AbortError') return
+      setAnalysisPreview(null)
       setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
       setAnalysisFolderReady(false)
+    } finally {
+      setAnalysisSelectingFolder(false)
+      setAnalysisScanningFolder(false)
     }
   }
 
   useEffect(() => {
     if (analysisFolderReady && analysisFiles.length > 0) {
-      const fd = new FormData()
-      fd.append('file', analysisFiles[0].file)
-      fd.append('low_pct', lowPct)
-      fd.append('high_pct', highPct)
-      fd.append('n_decay', nDecay)
-      fd.append('decay_fit_start_us', decayFitStartUs)
-      fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
-        .then(r => r.json())
-        .then(data => {
-          if (data.success) setAnalysisPreview(data)
-          else setAnalysisError(data.error || '미리보기 로드 실패')
-        })
-        .catch(err => setAnalysisError(err.message))
+      loadAnalysisPreview(analysisFiles[0].handle).catch(err => {
+        setAnalysisPreview(null)
+        setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
+      })
     }
   }, [lowPct, highPct, nDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
 
@@ -331,9 +336,18 @@ export default function AnalysisTab({ backendStatus }) {
     const controller = new AbortController()
     analysisAbortRef.current = controller
     try {
+      const hasWritePermission = await ensureReadWritePermission(analysisDirHandle)
+      if (!hasWritePermission) {
+        throw new Error('폴더 쓰기 권한이 필요합니다. 권한 요청을 허용한 뒤 다시 시도해주세요.')
+      }
+
       const fd = new FormData()
-      analysisFiles.forEach(({ file }) => fd.append('files', file))
-      analysisVilFiles.forEach(({ file }) => fd.append('vil_files', file))
+      for (const { handle } of analysisFiles) {
+        fd.append('files', await handle.getFile())
+      }
+      for (const { handle } of analysisVilFiles) {
+        fd.append('vil_files', await handle.getFile())
+      }
       fd.append('low_pct', lowPct)
       fd.append('high_pct', highPct)
       fd.append('n_decay', nDecay)
@@ -378,9 +392,9 @@ export default function AnalysisTab({ backendStatus }) {
       <button
         className="simulate-button"
         onClick={handleAnalysisFolderSelect}
-        disabled={backendStatus?.status !== 'ok'}
+        disabled={analysisSelectingFolder || analysisScanningFolder || backendStatus?.status !== 'ok'}
       >
-        폴더 선택 (TrEL_processed)
+        {analysisSelectingFolder ? '폴더 선택 창 여는 중...' : analysisScanningFolder ? '폴더 스캔 중...' : '폴더 선택 (TrEL_processed)'}
       </button>
 
       {analysisFolderReady && analysisFiles.length > 0 && (

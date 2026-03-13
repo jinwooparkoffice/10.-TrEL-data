@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 
+from utils.trel_common import parse_minutes_from_filename, parse_trel_csv_frame
+
 
 def parse_vil_processed_for_voltage(content: str) -> Tuple[Optional[float], List[Tuple[float, float]]]:
     """
@@ -80,46 +82,21 @@ def interpolate_voltage_at_time(t_min: float, vil_data: List[Tuple[float, float]
 
 def parse_trel_csv(content: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    TrEL CSV 파싱 (Pandas Optimized)
+    TrEL CSV 파싱
     Col0: Time (μs) -> time_raw
     Col1: Shifted Time (μs) -> time_shifted
     Col2: Norm. Intensity -> el_signal
     Col3: Current Density -> current_density
     """
-    try:
-        # Auto-detect header/start of data
-        lines = content.splitlines()
-        start_idx = 3 # Default fallback
-        
-        # Look for the first line starting with a number or minus sign
-        for i, line in enumerate(lines[:20]): # Check first 20 lines
-            if re.match(r'^\s*-?\d', line):
-                start_idx = i
-                break
-
-        # skiprows=start_idx: 헤더 포함 start_idx줄 건너뜀 (start_idx+1번째 줄부터 데이터)
-        # header=None: 컬럼명 없음
-        df = pd.read_csv(io.StringIO(content), skiprows=start_idx, header=None)
-        
-        # 데이터가 숫자가 아닌 경우 처리 (NaN 변환)
-        df = df.apply(pd.to_numeric, errors='coerce')
-        # Inf 제거
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        # NaN이 포함된 행 제거 (데이터 무결성 보장)
-        df = df.dropna(how='any')
-
-        if df.shape[1] < 3:
-            return np.array([]), np.array([]), np.array([]), np.array([])
-            
-        time_raw = df.iloc[:, 0].values
-        time_shifted = df.iloc[:, 1].values
-        el_signal = df.iloc[:, 2].values
-        current_density = df.iloc[:, 3].values if df.shape[1] >= 4 else np.zeros_like(time_raw)
-        
-        return time_raw, time_shifted, el_signal, current_density
-        
-    except Exception:
+    df = parse_trel_csv_frame(content)
+    if df.empty:
         return np.array([]), np.array([]), np.array([]), np.array([])
+
+    time_raw = df.iloc[:, 0].to_numpy()
+    time_shifted = df.iloc[:, 1].to_numpy()
+    el_signal = df.iloc[:, 2].to_numpy()
+    current_density = df.iloc[:, 3].fillna(0.0).to_numpy()
+    return time_raw, time_shifted, el_signal, current_density
 
 
 def extract_normalized_intensity(content: str) -> List[float]:
@@ -411,17 +388,6 @@ def calculate_relative_capacitance(
     
     # Taking absolute value for charge amount
     return float(np.abs(q_total))
-
-
-def parse_minutes_from_filename(filename: str) -> Optional[float]:
-    """파일명에서 측정 시간(분) 추출"""
-    m = re.search(r'(\d+)h(\d+)min', filename, re.IGNORECASE)
-    if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
-    m = re.search(r'(\d+)min', filename, re.IGNORECASE)
-    if m:
-        return float(m.group(1))
-    return None
 
 
 def parse_after_duty_from_filename(filename: str) -> Optional[str]:

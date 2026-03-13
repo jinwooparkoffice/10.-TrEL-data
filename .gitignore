@@ -2,11 +2,7 @@ node_modules/
 dist/
 __pycache__/
 *.pyc
+.DS_Store
 .env
 *.log
 vite.config.js.timestamp-*.mjs
-.DS_Store
-.venv/
-venv/
-*.pyc
-__pycache__/

@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import './App.css'
 import AnalysisTab from './AnalysisTab'
-
-const API_ORIGIN = import.meta.env.VITE_API_ORIGIN || `${window.location.protocol}//${window.location.hostname}:8080`
-const apiUrl = (path) => `${API_ORIGIN}${path}`
+import { apiUrl } from './api'
+import { dedupFilesByPath, scanBatchFolder } from './fileUtils'
 
 function PreviewChart({ timeNs, ch1, baselineStart, baselineEnd, normStart, normEnd }) {
   const w = 600
@@ -65,10 +64,178 @@ function PreviewChart({ timeNs, ch1, baselineStart, baselineEnd, normStart, norm
   )
 }
 
+const parseMinutesFromFilename = (filename = '') => {
+  const baseName = filename.replace(/\.[^.]+$/, '')
+  const patterns = [
+    /(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*min(?=$|[_\-\s])/gi,
+    /(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*m(?=$|[_\-\s])/gi,
+    /(?:^|[_\-\s])(\d+)\s*h(?=$|[_\-\s])/gi,
+  ]
+
+  for (const pattern of patterns) {
+    const matches = [...baseName.matchAll(pattern)]
+    if (matches.length === 0) continue
+
+    const match = matches[matches.length - 1]
+    if (match.length >= 3) {
+      const hours = match[1] ? Number(match[1]) : 0
+      const minutes = Number(match[2])
+      return hours * 60 + minutes
+    }
+
+    if (match.length >= 2) {
+      return Number(match[1]) * 60
+    }
+  }
+
+  return null
+}
+
+const parseMinutesFromEntry = (entry) => {
+  const candidates = [
+    entry.name,
+    entry.filename,
+    entry.originalFilename,
+    entry.relPath,
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    const minutes = parseMinutesFromFilename(candidate)
+    if (Number.isFinite(minutes)) {
+      return minutes
+    }
+  }
+
+  return null
+}
+
+const parseMasterPercents = (rawValue) => {
+  const values = rawValue
+    .split(',')
+    .map(value => Number.parseInt(value.trim(), 10))
+    .filter(value => Number.isFinite(value))
+
+  return values.length > 0 ? values : [100, 90, 80, 70, 60, 50]
+}
+
+const parseVilProcessedCsv = (csvText) => {
+  const rows = csvText
+    .split(/\r?\n/)
+    .filter(line => line.trim() && !line.startsWith('#'))
+    .map(line => line.split(',').map(cell => cell.trim()))
+
+  if (rows.length < 2) return []
+
+  const header = rows[0]
+  let timeIndex = header.findIndex(cell => cell.includes('Time (min)'))
+  let relLumIndex = header.findIndex(cell => cell.includes('Relative luminance'))
+
+  if (timeIndex === -1 || relLumIndex === -1) {
+    if (header.length >= 4) {
+      timeIndex = 0
+      relLumIndex = 3
+    } else {
+      return []
+    }
+  }
+
+  return rows
+    .slice(1)
+    .map(row => ({
+      timeMin: Number.parseFloat(row[timeIndex]),
+      relLum: Number.parseFloat(row[relLumIndex]),
+    }))
+    .filter(point => Number.isFinite(point.timeMin) && Number.isFinite(point.relLum))
+}
+
+const interpolateTimeAtRatio = (points, targetRatio) => {
+  if (points.length < 2) return null
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index]
+    const next = points[index + 1]
+    if (
+      (current.relLum >= targetRatio && next.relLum <= targetRatio) ||
+      (current.relLum <= targetRatio && next.relLum >= targetRatio)
+    ) {
+      const delta = next.relLum - current.relLum
+      if (Math.abs(delta) < 1e-12) return current.timeMin
+      const fraction = (targetRatio - current.relLum) / delta
+      return current.timeMin + fraction * (next.timeMin - current.timeMin)
+    }
+  }
+
+  return null
+}
+
+const pickEvenlySpacedEntries = (entries, maxCount) => {
+  if (entries.length === 0) return []
+  if (entries.length <= maxCount) return entries
+
+  const selected = []
+  const usedIndexes = new Set()
+  if (maxCount <= 1) return [entries[0]]
+
+  const step = (entries.length - 1) / (maxCount - 1)
+
+  for (let index = 0; index < maxCount; index += 1) {
+    const pickedIndex = Math.round(index * step)
+    if (!usedIndexes.has(pickedIndex)) {
+      selected.push(entries[pickedIndex])
+      usedIndexes.add(pickedIndex)
+    }
+  }
+
+  return selected
+}
+
+const selectMasterSourceFiles = (vilCsv, vilTimeShiftMin, percentText, trelEntries) => {
+  const targetCount = Math.max(1, parseMasterPercents(percentText).length)
+  const vilPoints = parseVilProcessedCsv(vilCsv)
+  const fallbackEntries = pickEvenlySpacedEntries(trelEntries, Math.min(targetCount, trelEntries.length))
+
+  if (vilPoints.length < 2) return fallbackEntries
+
+  const fileEntries = trelEntries
+    .map(entry => ({ ...entry, minutes: parseMinutesFromEntry(entry) }))
+    .filter(entry => Number.isFinite(entry.minutes))
+
+  if (fileEntries.length === 0) return fallbackEntries
+
+  const selected = []
+  const selectedKeys = new Set()
+
+  for (const percent of parseMasterPercents(percentText)) {
+    const targetTime = interpolateTimeAtRatio(vilPoints, percent / 100) 
+    if (!Number.isFinite(targetTime)) continue
+
+    const shiftedTarget = targetTime + (Number(vilTimeShiftMin) || 0)
+    const closest = fileEntries.reduce((best, current) => {
+      if (!best) return current
+      return Math.abs(current.minutes - shiftedTarget) < Math.abs(best.minutes - shiftedTarget) ? current : best
+    }, null)
+
+    if (!closest) continue
+
+    const key = closest.relPath || closest.name
+    if (!selectedKeys.has(key)) {
+      selected.push(closest)
+      selectedKeys.add(key)
+    }
+  }
+
+  if (selected.length > 0) return selected
+
+  const sortedEntries = [...fileEntries].sort((a, b) => a.minutes - b.minutes)
+  return pickEvenlySpacedEntries(sortedEntries, Math.min(targetCount, sortedEntries.length))
+}
+
 function App() {
   const [logoError, setLogoError] = useState(false)
   const [backendStatus, setBackendStatus] = useState(null)
   const [processing, setProcessing] = useState(false)
+  const [selectingFolder, setSelectingFolder] = useState(false)
+  const [scanningFolder, setScanningFolder] = useState(false)
   const [error, setError] = useState(null)
   const [results, setResults] = useState({ vil: [], osc: [], master: false, masterMetadata: null })
   const [folderReady, setFolderReady] = useState(false)
@@ -98,32 +265,6 @@ function App() {
       .catch(() => setBackendStatus({ status: 'error' }))
   }, [])
 
-  const collectFiles = async (dir, prefix, filter) => {
-    const list = []
-    for await (const [name, handle] of dir.entries()) {
-      const relPath = prefix ? `${prefix}/${name}` : name
-      if (handle.kind === 'file' && filter(name)) {
-        list.push({ name, relPath, file: await handle.getFile() })
-      } else if (handle.kind === 'directory') {
-        list.push(...await collectFiles(handle, relPath, filter))
-      }
-    }
-    return list
-  }
-  const dedup = (list) => {
-    const s = new Set()
-    return list.filter(({ relPath }) => (s.has(relPath) ? false : (s.add(relPath), true)))
-  }
-  const getDirForPath = async (dh, relPath) => {
-    const parts = relPath.split('/')
-    if (parts.length <= 1) return dh
-    let d = dh
-    for (let i = 0; i < parts.length - 1; i++) {
-      d = await d.getDirectoryHandle(parts[i], { create: true })
-    }
-    return d
-  }
-
   const base64ToUint8Array = (b64) => {
     const binary = atob(b64)
     const bytes = new Uint8Array(binary.length)
@@ -131,22 +272,43 @@ function App() {
     return bytes
   }
 
+  const ensureReadWritePermission = async (dirHandle) => {
+    const options = { mode: 'readwrite' }
+    if ((await dirHandle.queryPermission(options)) === 'granted') {
+      return true
+    }
+    return (await dirHandle.requestPermission(options)) === 'granted'
+  }
+
   const handleFolderSelect = async () => {
+    if (selectingFolder) return
     if (!('showDirectoryPicker' in window)) {
       setError('이 브라우저는 폴더 선택을 지원하지 않습니다. Chrome 또는 Edge를 사용해주세요.')
       return
     }
+
+    let dirHandle
+    try {
+      setSelectingFolder(true)
+      dirHandle = await window.showDirectoryPicker({ id: 'trel-batch-folder' })
+    } catch (err) {
+      setSelectingFolder(false)
+      if (err.name === 'AbortError') return
+      setError(getReadableError(err))
+      setFolderReady(false)
+      return
+    }
+
     setError(null)
     setResults({ vil: [], osc: [], master: false, masterMetadata: null })
     try {
-      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
-      let vilFiles = dedup(await collectFiles(dirHandle, '', n =>
-        !n.startsWith('._') && n.toUpperCase().includes('VIL') && n.endsWith('.csv')
-      ))
-      let oscFiles = dedup(await collectFiles(dirHandle, '', n =>
-        !n.startsWith('._') && n.endsWith('.csv') && !n.toUpperCase().includes('VIL') && n.includes('Hz')
-      ))
-      const existingTrel = await collectFiles(dirHandle, '', n => n.endsWith('_TrEL.csv') && !n.startsWith('._'))
+      setSelectingFolder(false)
+      setScanningFolder(true)
+
+      const scanned = await scanBatchFolder(dirHandle)
+      const vilFiles = dedupFilesByPath(scanned.vilFiles)
+      const oscFiles = dedupFilesByPath(scanned.oscFiles)
+      const existingTrel = dedupFilesByPath(scanned.existingTrel)
       if (vilFiles.length === 0 && oscFiles.length === 0 && existingTrel.length === 0) {
         setError('처리할 CSV 파일이 없습니다. (VIL, 오실로스코프 Hz, 또는 _TrEL.csv)')
         setFolderReady(false)
@@ -155,7 +317,7 @@ function App() {
       let previewData = null
       if (oscFiles.length > 0) {
         const fd = new FormData()
-        fd.append('file', oscFiles[0].file)
+        fd.append('file', await oscFiles[0].handle.getFile())
         const res = await fetch(apiUrl('/api/preview-osc'), { method: 'POST', body: fd })
         const data = await res.json()
         if (data.success) previewData = data
@@ -164,9 +326,11 @@ function App() {
       setFolderReady(true)
       if (oscFiles.length > 0) setTrelConfigOpen(true)
     } catch (err) {
-      if (err.name === 'AbortError') return
       setError(getReadableError(err))
       setFolderReady(false)
+    } finally {
+      setSelectingFolder(false)
+      setScanningFolder(false)
     }
   }
 
@@ -179,10 +343,18 @@ function App() {
     const { dirHandle, vilFiles, oscFiles, existingTrel } = folderData
     const signal = controller.signal
     try {
+      const hasWritePermission = await ensureReadWritePermission(dirHandle)
+      if (!hasWritePermission) {
+        throw new Error('폴더 쓰기 권한이 필요합니다. 권한 요청을 허용한 뒤 다시 시도해주세요.')
+      }
+
       let vilResults = []
       if (vilFiles.length > 0) {
         const fd = new FormData()
-        vilFiles.forEach(({ file, relPath }) => { fd.append('files', file); fd.append('paths', relPath) })
+        for (const { handle, relPath } of vilFiles) {
+          fd.append('files', await handle.getFile())
+          fd.append('paths', relPath)
+        }
         const res = await fetch(apiUrl('/api/process-vil'), { method: 'POST', body: fd, signal })
         const data = await res.json()
         if (!data.success) throw new Error(data.error || 'VIL 처리 실패')
@@ -210,42 +382,73 @@ function App() {
 
       let oscResults = []
       if (oscFiles.length > 0) {
-        const fd = new FormData()
-        oscFiles.forEach(({ file, relPath }) => { fd.append('files', file); fd.append('paths', relPath) })
-        fd.append('baseline_start_ns', baselineStart)
-        fd.append('baseline_end_ns', baselineEnd)
-        if (normStart.trim()) fd.append('norm_start_ns', normStart.trim())
-        if (normEnd.trim()) fd.append('norm_end_ns', normEnd.trim())
-        const res = await fetch(apiUrl('/api/process-osc'), { method: 'POST', body: fd, signal })
-        const data = await res.json().catch(() => ({}))
-        if (!data.success) throw new Error(data.error || 'TrEL 처리 실패')
-        oscResults = data.results || []
         const outDir = await dirHandle.getDirectoryHandle('TrEL_processed', { create: true })
-        for (const r of oscResults) {
-          if (r.success && r.csv) {
-            const pathParts = (r.relPath || r.filename).split('/').slice(0, -1)
-            let targetDir = outDir
-            for (const p of pathParts) {
-              targetDir = await targetDir.getDirectoryHandle(p, { create: true })
+        for (const { handle, relPath } of oscFiles) {
+          const fd = new FormData()
+          fd.append('file', await handle.getFile())
+          fd.append('paths', relPath)
+          fd.append('baseline_start_ns', baselineStart)
+          fd.append('baseline_end_ns', baselineEnd)
+          if (normStart.trim()) fd.append('norm_start_ns', normStart.trim())
+          if (normEnd.trim()) fd.append('norm_end_ns', normEnd.trim())
+
+          const res = await fetch(apiUrl('/api/process-osc'), { method: 'POST', body: fd, signal })
+          const data = await res.json().catch(() => ({}))
+          if (!data.success) throw new Error(data.error || 'TrEL 처리 실패')
+
+          const fileResults = data.results || []
+          oscResults.push(...fileResults)
+
+          for (const r of fileResults) {
+            if (r.success && r.csv) {
+              const pathParts = (r.relPath || r.filename).split('/').slice(0, -1)
+              let targetDir = outDir
+              for (const p of pathParts) {
+                targetDir = await targetDir.getDirectoryHandle(p, { create: true })
+              }
+              const fh = await targetDir.getFileHandle(r.output_filename, { create: true })
+              const w = await fh.createWritable()
+              await w.write(r.csv)
+              await w.close()
             }
-            const fh = await targetDir.getFileHandle(r.output_filename, { create: true })
-            const w = await fh.createWritable()
-            await w.write(r.csv)
-            await w.close()
           }
         }
       }
 
-      let trelFiles = oscResults.filter(r => r.success && r.csv)
-        .map(r => new File([r.csv], r.output_filename))
-      if (trelFiles.length === 0) {
-        const existing = await collectFiles(dirHandle, '', n => n.endsWith('_TrEL.csv') && !n.startsWith('._'))
-        trelFiles = existing.map(({ file }) => file)
-      }
       let masterOk = false
       let masterMetadata = null
       const vilForMaster = vilResults.find(r => r.success && r.csv)
-      if (trelFiles.length > 0 && vilForMaster) {
+      if (vilForMaster) {
+        const generatedTrelEntries = oscResults
+          .filter(r => r.success && r.csv)
+          .map(r => ({
+            name: r.output_filename,
+            filename: r.output_filename,
+            originalFilename: r.filename,
+            relPath: r.relPath || r.output_filename,
+            cacheKey: r.cache_key,
+            getFile: async () => new File([r.csv], r.output_filename),
+          }))
+
+        const existingTrelEntries = existingTrel.map(({ name, relPath, handle }) => ({
+          name,
+          filename: name,
+          relPath,
+          getFile: async () => handle.getFile(),
+        }))
+
+        const candidateTrelEntries = generatedTrelEntries.length > 0 ? generatedTrelEntries : existingTrelEntries
+        const selectedMasterEntries = selectMasterSourceFiles(
+          vilForMaster.csv,
+          vilForMaster.time_shift_min,
+          masterPercents,
+          candidateTrelEntries,
+        )
+
+        if (selectedMasterEntries.length === 0) {
+          throw new Error('마스터 파일 생성에 사용할 TrEL 파일을 고르지 못했습니다. 파일명에 1min, 1h2min 같은 시간이 포함되어 있는지 확인해주세요.')
+        }
+
         // 마스터 파일 생성 전 백엔드 연결 확인 및 재시도
         let retryCount = 0
         const maxRetries = 3
@@ -260,10 +463,20 @@ function App() {
             }
             
             const fd = new FormData()
-            fd.append('vil_csv', vilForMaster.csv)
-            fd.append('vil_time_shift_min', String(vilForMaster.time_shift_min ?? 0))
+            if (vilForMaster.cache_key) {
+              fd.append('vil_cache_key', vilForMaster.cache_key)
+            } else {
+              fd.append('vil_csv', vilForMaster.csv)
+              fd.append('vil_time_shift_min', String(vilForMaster.time_shift_min ?? 0))
+            }
             fd.append('master_percents', masterPercents.replace(/\s/g, ''))
-            trelFiles.forEach(f => fd.append('files', f))
+            for (const entry of selectedMasterEntries) {
+              if (entry.cacheKey) {
+                fd.append('cache_keys', entry.cacheKey)
+              } else {
+                fd.append('files', await entry.getFile())
+              }
+            }
             
             const res = await fetch(apiUrl('/api/create-master'), { 
               method: 'POST', 
@@ -397,9 +610,9 @@ function App() {
           <button
             className="simulate-button"
             onClick={handleFolderSelect}
-            disabled={processing || backendStatus?.status !== 'ok'}
+            disabled={processing || selectingFolder || scanningFolder || backendStatus?.status !== 'ok'}
           >
-            폴더 선택
+            {selectingFolder ? '폴더 선택 창 여는 중...' : scanningFolder ? '폴더 스캔 중...' : '폴더 선택'}
           </button>
 
           {folderReady && folderData && (

@@ -3,7 +3,9 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import json
 import base64
 import io
+import time
 import traceback
+import uuid
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
@@ -15,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.vil_processor import process_vil_data, parse_target_current_from_filename
 from utils.osc_processor import process_osc_data, parse_frequency_duty, get_preview_data
 from utils.master_processor import process_master
+from utils.trel_common import parse_minutes_from_filename
 from utils.trel_analysis import (
     analyze_single_file,
     get_preview_data as get_trel_preview,
@@ -23,6 +26,30 @@ from utils.trel_analysis import (
 
 app = Flask(__name__)
 CORS(app)
+
+TREL_CACHE_TTL_SECONDS = 60 * 30
+PROCESSED_TREL_CACHE = {}
+PROCESSED_VIL_CACHE = {}
+
+
+def prune_cache(cache_store):
+    now = time.time()
+    expired_keys = [
+        key for key, value in cache_store.items()
+        if now - value['created_at'] > TREL_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        cache_store.pop(key, None)
+
+
+def store_csv_cache(cache_store, payload):
+    prune_cache(cache_store)
+    cache_key = uuid.uuid4().hex
+    cache_store[cache_key] = {
+        **payload,
+        'created_at': time.time(),
+    }
+    return cache_key
 
 
 def csv_text_to_xlsx_bytes(csv_text: str) -> bytes:
@@ -167,6 +194,11 @@ def process_vil():
                     'output_filename': meta.get('output_filename', filename.replace('.csv', '_processed.xlsx')),
                     'success': True,
                     'csv': csv_out,
+                    'cache_key': store_csv_cache(PROCESSED_VIL_CACHE, {
+                        'filename': filename,
+                        'csv': csv_out,
+                        'time_shift_min': meta['time_shift_min'],
+                    }),
                     'xlsx_b64': base64.b64encode(xlsx_bytes).decode('ascii'),
                     'time_shift_s': meta['time_shift_s'],
                     'time_shift_min': meta['time_shift_min'],
@@ -279,6 +311,10 @@ def process_osc():
                     'output_filename': meta['output_filename'],
                     'success': True,
                     'csv': csv_out,
+                    'cache_key': store_csv_cache(PROCESSED_TREL_CACHE, {
+                        'filename': meta['output_filename'],
+                        'csv': csv_out,
+                    }),
                     'original_points': meta['original_points'],
                 })
             except Exception as e:
@@ -304,9 +340,20 @@ def create_master():
     """
     try:
         print('[create-master] 요청 수신', flush=True)
+        vil_cache_key = request.form.get('vil_cache_key', '').strip()
         vil_csv = request.form.get('vil_csv', '').strip()
         vil_time_shift_min_str = request.form.get('vil_time_shift_min', '0').strip()
         vil_time_shift_min = float(vil_time_shift_min_str) if vil_time_shift_min_str else 0.0
+
+        if vil_cache_key:
+            prune_cache(PROCESSED_VIL_CACHE)
+            cached_vil = PROCESSED_VIL_CACHE.get(vil_cache_key)
+            if cached_vil:
+                vil_csv = cached_vil['csv']
+                vil_time_shift_min = cached_vil['time_shift_min']
+                print(f'[create-master] VIL cache hit: {vil_cache_key}', flush=True)
+            else:
+                print(f'[create-master] VIL cache miss: {vil_cache_key}', flush=True)
 
         master_percents_str = request.form.get('master_percents', '100,90,80,70,60,50').strip()
         try:
@@ -316,21 +363,50 @@ def create_master():
         if not master_percents:
             master_percents = [100, 90, 80, 70, 60, 50]
 
+        cache_keys = [key for key in request.form.getlist('cache_keys') if key]
         files = request.files.getlist('files') or ([request.files.get('file')] if request.files.get('file') else [])
         files = [f for f in files if f and f.filename and not f.filename.startswith('._') and '_TrEL.csv' in f.filename]
 
         if not vil_csv:
             return jsonify({'success': False, 'error': 'VIL 처리된 CSV가 필요합니다. 마스터 생성은 VIL 데이터를 기반으로 합니다.'}), 400
-        if not files:
+        if not files and not cache_keys:
             return jsonify({'success': False, 'error': 'TrEL 처리된 CSV 파일이 없습니다. (_TrEL.csv)'}), 400
 
+        print(f'[create-master] 업로드된 TrEL 후보 files={len(files)}, cache_keys={len(cache_keys)}개', flush=True)
         files_data = []
+        prune_cache(PROCESSED_TREL_CACHE)
+        for cache_key in cache_keys:
+            cached = PROCESSED_TREL_CACHE.get(cache_key)
+            if not cached:
+                print(f'[create-master] TrEL cache miss: {cache_key}', flush=True)
+                continue
+            files_data.append((cached['filename'], cached['csv']))
+            parsed_minutes = parse_minutes_from_filename(cached['filename'])
+            print(
+                f'[create-master] 캐시 후보 파일: {cached["filename"]} | parsed_minutes={parsed_minutes}',
+                flush=True,
+            )
+
         for f in files:
             content = f.read().decode('utf-8', errors='replace')
             files_data.append((f.filename, content))
+            parsed_minutes = parse_minutes_from_filename(f.filename)
+            print(
+                f'[create-master] 후보 파일: {f.filename} | parsed_minutes={parsed_minutes}',
+                flush=True,
+            )
+
+        if not files_data:
+            return jsonify({'success': False, 'error': '마스터 생성용 TrEL 캐시가 만료되었거나 읽을 수 없습니다. 다시 처리 후 시도해주세요.'}), 400
+
+        print(
+            f'[create-master] master_percents={master_percents}, vil_time_shift_min={vil_time_shift_min}',
+            flush=True,
+        )
         print(f'[create-master] TrEL {len(files_data)}개 로드, process_master 시작', flush=True)
 
         xlsx_bytes, _summary, metadata = process_master(vil_csv, vil_time_shift_min, files_data, percent_list=master_percents)
+        print(f'[create-master] metadata={json.dumps(metadata, ensure_ascii=False)}', flush=True)
         print('[create-master] 완료', flush=True)
 
         # XLSX 파일 + X-Master-Metadata 헤더로 선택 파일 정보 전달

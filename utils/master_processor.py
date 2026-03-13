@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import openpyxl
 
+from utils.trel_common import parse_minutes_from_filename, parse_trel_csv_frame
+
 def parse_vil_processed(content: str) -> pd.DataFrame:
     """
     VIL 처리된 CSV 파싱 (Pandas Optimized)
@@ -29,13 +31,13 @@ def parse_vil_processed(content: str) -> pd.DataFrame:
         if time_col and rel_lum_col:
             res = df[[time_col, rel_lum_col]].copy()
             res.columns = ['Time (min)', 'Relative luminance (a.u.)'] # Normalize names
-            return res
+            return res.dropna()
             
         # 컬럼명이 다를 경우 인덱스로 접근 (Fallback: 0, 3)
         if len(df.columns) >= 4:
             res = df.iloc[:, [0, 3]].copy()
             res.columns = ['Time (min)', 'Relative luminance (a.u.)']
-            return res
+            return res.dropna()
             
     except Exception:
         pass
@@ -74,61 +76,16 @@ def interpolate_time_at_ratio(t_min: np.ndarray, rel_lum: np.ndarray, target_rat
     return None
 
 
-def parse_minutes_from_filename(filename: str) -> Optional[float]:
-    """
-    파일명에서 측정 시간(분) 추출
-    - 1min -> 1, 1h2min -> 62, 57min -> 57
-    Returns: 분 단위 float
-    """
-    m = re.search(r'(\d+)h(\d+)min', filename, re.IGNORECASE)
-    if m:
-        return int(m.group(1)) * 60 + int(m.group(2))
-    m = re.search(r'(\d+)min', filename, re.IGNORECASE)
-    if m:
-        return float(m.group(1))
-    return None
-
-
 def parse_minutes_display(filename: str) -> Optional[str]:
     """표시용: 1min, 1h 2min 등"""
-    m = re.search(r'(\d+)h(\d+)min', filename, re.IGNORECASE)
-    if m:
-        h, mn = int(m.group(1)), int(m.group(2))
-        return f"{h}h {mn}min" if h > 0 else f"{mn}min"
-    m = re.search(r'(\d+)min', filename, re.IGNORECASE)
-    if m:
-        return f"{m.group(1)}min"
-    return None
+    total_minutes = parse_minutes_from_filename(filename)
+    if total_minutes is None:
+        return None
 
-
-def parse_trel_csv(content: str) -> pd.DataFrame:
-    """
-    TrEL 처리된 CSV 파싱 (Pandas Optimized)
-    Returns: DataFrame with data
-    """
-    try:
-        # Auto-detect header/start of data
-        lines = content.splitlines()
-        start_idx = 3 # Default fallback
-        for i, line in enumerate(lines[:20]):
-            if re.match(r'^\s*-?\d', line):
-                start_idx = i
-                break
-        
-        # skiprows=start_idx: 헤더 포함 start_idx줄 건너뜀 (start_idx+1번째 줄부터 데이터)
-        # header=None: 컬럼명 없음
-        df = pd.read_csv(io.StringIO(content), skiprows=start_idx, header=None)
-        
-        if df.shape[1] == 3:
-             # 3 columns: Time, Shifted, Intensity (No Current)
-             df[3] = np.nan # Add 4th column as NaN
-             
-        if df.shape[1] >= 4:
-            df.columns = ['Time (μs)', 'Shifted Time (μs)', 'Normalized intensity (a.u.)', 'Current density (mA cm⁻²)']
-            return df
-    except Exception:
-        pass
-    return pd.DataFrame()
+    whole_minutes = int(round(total_minutes))
+    hours = whole_minutes // 60
+    minutes = whole_minutes % 60
+    return f"{hours}h {minutes}min" if hours > 0 else f"{minutes}min"
 
 
 def find_closest_file(files_with_minutes: List[Tuple[str, float]], target_min: float) -> Optional[Tuple[str, float]]:
@@ -176,6 +133,7 @@ def process_master(
     files_with_minutes = []
     for filename, _ in trel_files_data:
         mins = parse_minutes_from_filename(filename)
+        print(f"[process_master] parsed_minutes: {filename} -> {mins}", flush=True)
         if mins is not None:
             files_with_minutes.append((filename, mins))
 
@@ -186,10 +144,15 @@ def process_master(
     selected = {}
     for ratio in decay_thresholds:
         t_target = target_times.get(ratio)
+        print(f"[process_master] target ratio={ratio:.4f}, shifted_target_min={t_target}", flush=True)
         if t_target is None:
             continue
         closest = find_closest_file(files_with_minutes, t_target)
         if closest:
+            print(
+                f"[process_master] selected ratio={ratio:.4f}: filename={closest[0]}, minutes={closest[1]}",
+                flush=True,
+            )
             selected[ratio] = closest  # (filename, minutes)
 
     # 5. 선택된 파일 데이터 로드 및 병합 준비
@@ -226,7 +189,7 @@ def process_master(
         if ratio in selected:
             filename, mins = selected[ratio]
             content = trel_by_name.get(filename)
-            df = parse_trel_csv(content) if content else pd.DataFrame()
+            df = parse_trel_csv_frame(content) if content else pd.DataFrame()
         else:
             filename = None
             df = pd.DataFrame()

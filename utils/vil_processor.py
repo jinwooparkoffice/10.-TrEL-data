@@ -53,11 +53,17 @@ def process_vil_data(
     if len(df.columns) < 4:
          raise ValueError("CSV 파일의 컬럼 수가 부족합니다. (최소 4개 필요)")
 
+    # 필요한 4개 컬럼만 숫자로 강제 변환하고 유효한 행만 사용
+    numeric_df = df.iloc[:, :4].apply(pd.to_numeric, errors='coerce')
+    numeric_df = numeric_df.dropna(subset=numeric_df.columns[:4])
+    if len(numeric_df) == 0:
+        raise ValueError("유효한 숫자 데이터가 없습니다.")
+
     # 데이터를 numpy array로 변환하여 처리 (컬럼명 무관하게 인덱스로 접근)
-    t = df.iloc[:, 0].values
-    v = df.iloc[:, 1].values
-    i_ua = df.iloc[:, 2].values
-    l = df.iloc[:, 3].values
+    t = numeric_df.iloc[:, 0].values
+    v = numeric_df.iloc[:, 1].values
+    i_ua = numeric_df.iloc[:, 2].values
+    l = numeric_df.iloc[:, 3].values
 
     # 5% 허용 범위
     # low = target_current_ua * (1 - TOLERANCE)
@@ -119,8 +125,8 @@ def process_vil_data(
     j_ma_cm2 = (i_filtered / 1000.0) / area_cm2
 
     # Relative luminance: 최대값을 1로 정규화
-    l_max = np.max(l_filtered)
-    if l_max == 0:
+    l_max = np.nanmax(l_filtered)
+    if not np.isfinite(l_max) or l_max == 0:
         l_max = 1e-10
     
     rel_lum = l_filtered / l_max
