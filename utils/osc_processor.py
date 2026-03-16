@@ -22,9 +22,7 @@ import pandas as pd
 import numpy as np
 
 # 실험 상수
-R_SERIES = 100.0  # 직렬 저항 (Ω)
-R_OSC = 50.0      # 오실로스코프 입력 임피던스 (Ω)
-R_TOTAL = (R_SERIES * R_OSC) / (R_SERIES + R_OSC)  # 33.333... Ω
+from utils.circuit_config import DEFAULT_R_SHUNT, DEFAULT_R_OSC, calculate_r_total
 
 DEVICE_AREA_MM2 = 4.3
 AREA_CM2 = DEVICE_AREA_MM2 * 1e-2  # 0.043 cm²
@@ -107,10 +105,15 @@ def process_osc_data(
     filename: str = "",
     norm_start_ns: Optional[float] = None,
     norm_end_ns: Optional[float] = None,
+    r_shunt: Optional[float] = None,
+    r_osc: Optional[float] = None,
 ) -> Tuple[str, Dict]:
     """
     오실로스코프 TrEL 데이터 처리 (Pandas Optimized)
     """
+    # R_total 계산
+    r_total = calculate_r_total(r_shunt, r_osc)
+    
     df = load_osc_csv(csv_content)
 
     # 필수 컬럼 찾기 (유연한 매칭)
@@ -174,7 +177,7 @@ def process_osc_data(
     if np.any(mask_base):
         offset_ch2 = np.mean(ch2[mask_base])
         
-    j_raw = ((ch2 - offset_ch2) / R_TOTAL) / AREA_CM2 * 1000.0
+    j_raw = ((ch2 - offset_ch2) / r_total) / AREA_CM2 * 1000.0
 
     # 3. Time Shift Calculation
     # Trigger (t=0) is Voltage ON.
@@ -220,7 +223,9 @@ def process_osc_data(
         'norm_end_ns': norm_end_ns,
         'frequency_hz': frequency_hz,
         'duty_fraction': duty_fraction,
-        'r_total_ohm': R_TOTAL,
+        'r_total_ohm': r_total,
+        'r_shunt_ohm': r_shunt,
+        'r_osc_ohm': r_osc,
         'area_cm2': AREA_CM2
     }
 

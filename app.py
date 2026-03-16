@@ -185,8 +185,14 @@ def process_vil():
                 continue
 
             try:
+                # R_shunt, R_osc 파라미터 받기 (기본값 사용)
+                r_shunt = request.form.get('r_shunt')
+                r_osc = request.form.get('r_osc')
+                r_shunt = float(r_shunt) if r_shunt else None
+                r_osc = float(r_osc) if r_osc else None
+                
                 content = f.read().decode('utf-8', errors='replace')
-                csv_out, time_shift, meta = process_vil_data(content, target, filename)
+                csv_out, time_shift, meta = process_vil_data(content, target, filename, r_shunt, r_osc)
                 xlsx_bytes = csv_text_to_xlsx_bytes(csv_out)
                 results.append({
                     'filename': filename,
@@ -294,6 +300,12 @@ def process_osc():
                 duty = 0.25  # 기본 25%
 
             try:
+                # R_shunt, R_osc 파라미터 받기 (기본값 사용)
+                r_shunt = request.form.get('r_shunt')
+                r_osc = request.form.get('r_osc')
+                r_shunt = float(r_shunt) if r_shunt else None
+                r_osc = float(r_osc) if r_osc else None
+                
                 content = f.read().decode('utf-8', errors='replace')
                 csv_out, meta = process_osc_data(
                     content,
@@ -304,6 +316,8 @@ def process_osc():
                     filename=filename,
                     norm_start_ns=norm_start_ns,
                     norm_end_ns=norm_end_ns,
+                    r_shunt=r_shunt,
+                    r_osc=r_osc,
                 )
                 results.append({
                     'filename': filename,

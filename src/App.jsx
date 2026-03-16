@@ -246,8 +246,13 @@ function App() {
   const [normEnd, setNormEnd] = useState('')
   const [masterPercents, setMasterPercents] = useState('100, 90, 80, 70, 60, 50')
   const [trelConfigOpen, setTrelConfigOpen] = useState(false)
+  const [rShunt, setRShunt] = useState(100.0)  // 직렬 센서 저항 (Ω)
+  const [rOsc, setROsc] = useState(50.0)       // 오실로스코프 내부 저항 (Ω)
   const [activeTab, setActiveTab] = useState('batch')  // 'batch' | 'analysis'
   const batchAbortRef = useRef(null)
+  
+  // R_total 자동 계산
+  const rTotal = (rShunt * rOsc) / (rShunt + rOsc)
 
   const getReadableError = (err) => {
     if (!err) return '알 수 없는 오류'
@@ -355,6 +360,8 @@ function App() {
           fd.append('files', await handle.getFile())
           fd.append('paths', relPath)
         }
+        fd.append('r_shunt', rShunt)
+        fd.append('r_osc', rOsc)
         const res = await fetch(apiUrl('/api/process-vil'), { method: 'POST', body: fd, signal })
         const data = await res.json()
         if (!data.success) throw new Error(data.error || 'VIL 처리 실패')
@@ -391,6 +398,8 @@ function App() {
           fd.append('baseline_end_ns', baselineEnd)
           if (normStart.trim()) fd.append('norm_start_ns', normStart.trim())
           if (normEnd.trim()) fd.append('norm_end_ns', normEnd.trim())
+          fd.append('r_shunt', rShunt)
+          fd.append('r_osc', rOsc)
 
           const res = await fetch(apiUrl('/api/process-osc'), { method: 'POST', body: fd, signal })
           const data = await res.json().catch(() => ({}))
@@ -618,6 +627,45 @@ function App() {
           {folderReady && folderData && (
             <div style={{ marginTop: '20px', padding: '16px', background: '#fafafa', borderRadius: '6px', border: '1px solid #e0e0e0' }}>
               <h3 style={{ marginBottom: '12px', fontSize: '1.1em' }}>TrEL 처리 설정</h3>
+              
+              {/* 회로 설정 (Low-side Sensing) */}
+              <div style={{ marginBottom: '16px', padding: '12px', background: '#fff', borderRadius: '4px', border: '1px solid #ddd' }}>
+                <h4 style={{ marginBottom: '8px', fontSize: '0.95em', fontWeight: 600 }}>회로 파라미터 (Low-side Sensing)</h4>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', alignItems: 'flex-end' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>R_shunt (직렬 센서 저항, Ω)</label>
+                    <input
+                      type="number"
+                      value={rShunt}
+                      onChange={e => setRShunt(Number(e.target.value))}
+                      step={0.1}
+                      min={0.1}
+                      style={{ width: '120px', padding: '6px 8px' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>R_osc (오실로스코프 내부 저항, Ω)</label>
+                    <input
+                      type="number"
+                      value={rOsc}
+                      onChange={e => setROsc(Number(e.target.value))}
+                      step={0.1}
+                      min={0.1}
+                      style={{ width: '120px', padding: '6px 8px' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px', color: '#1565c0', fontWeight: 600 }}>R_total (합성 저항, Ω)</label>
+                    <div style={{ width: '120px', padding: '6px 8px', background: '#e3f2fd', borderRadius: '4px', fontSize: '0.9em', fontWeight: 600 }}>
+                      {rTotal.toFixed(3)}
+                    </div>
+                  </div>
+                </div>
+                <div style={{ marginTop: '8px', fontSize: '0.8em', color: '#666' }}>
+                  계산식: R_total = (R_shunt × R_osc) / (R_shunt + R_osc)
+                </div>
+              </div>
+              
               {folderData.vilFiles?.length > 0 && (
                 <div style={{ marginBottom: '16px' }}>
                   <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>마스터 파일 퍼센트 (%)</label>

@@ -3,6 +3,7 @@ TrEL (Transient Electroluminescence) VIL 데이터 처리
 - 목표 전류로부터 5% 이내 데이터만 유지
 - 영점 조정: 처음 5% 이내 들어오는 시점을 t=0으로
 - Relative luminance: 최대값을 1로 정규화 (0~1 범위)
+- Low-side Sensing 보정: V_device = V_applied - (I × R_total)
 - 출력: Time(min), Voltage(V), Current density(mA/cm²), Relative luminance(a.u.)
 """
 import re
@@ -10,6 +11,7 @@ import io
 from typing import Optional, Tuple, Dict
 import pandas as pd
 import numpy as np
+from utils.circuit_config import calculate_r_total, calculate_device_voltage
 
 DEVICE_AREA_MM2 = 4.3  # 소자 크기 (mm²)
 TOLERANCE = 0.05  # 5% 허용 오차
@@ -27,10 +29,26 @@ def parse_target_current_from_filename(filename: str) -> Optional[float]:
     return None
 
 
+def parse_duty_from_filename(filename: str) -> Optional[float]:
+    """
+    파일명에서 Duty(%) 추출
+    형식: YYMMDD_CC_7000uA_1000Hz_duty25%_VIL_1552.csv
+    """
+    duty_match = re.search(r'duty\s*(\d+(?:\.\d+)?)\s*%?', filename, re.IGNORECASE)
+    if duty_match:
+        val = float(duty_match.group(1))
+        # duty25 -> 0.25, duty0.5 -> 0.005? 보통 파일명엔 % 단위 사용 (25 = 25%)
+        duty_fraction = val / 100.0 if val > 1.0 else val
+        return duty_fraction
+    return None
+
+
 def process_vil_data(
     csv_content: str,
     target_current_ua: float,
-    filename: str = ""
+    filename: str = "",
+    r_shunt: Optional[float] = None,
+    r_osc: Optional[float] = None
 ) -> Tuple[str, float, Dict]:
     """
     VIL CSV 데이터 처리 (Pandas Optimized)
@@ -61,9 +79,16 @@ def process_vil_data(
 
     # 데이터를 numpy array로 변환하여 처리 (컬럼명 무관하게 인덱스로 접근)
     t = numeric_df.iloc[:, 0].values
-    v = numeric_df.iloc[:, 1].values
-    i_ua = numeric_df.iloc[:, 2].values
+    v_applied = numeric_df.iloc[:, 1].values  # 인가 전압 (V)
+    i_ua = numeric_df.iloc[:, 2].values  # 전류 (µA)
     l = numeric_df.iloc[:, 3].values
+    
+    # Low-side Sensing 보정: R_total 계산
+    r_total = calculate_r_total(r_shunt, r_osc)
+    
+    # 유효 인가 전압 계산: V_device = V_applied - (I × R_total)
+    # I는 µA 단위이므로 A로 변환 필요
+    v_device = calculate_device_voltage(v_applied, i_ua, r_total)
 
     # 5% 허용 범위
     # low = target_current_ua * (1 - TOLERANCE)
@@ -109,7 +134,7 @@ def process_vil_data(
         last_idx = len(t)
         
     t_filtered = t[first_idx:last_idx]
-    v_filtered = v[first_idx:last_idx]
+    v_device_filtered = v_device[first_idx:last_idx]  # 보정된 전압 사용
     i_filtered = i_ua[first_idx:last_idx]
     l_filtered = l[first_idx:last_idx]
 
@@ -131,10 +156,18 @@ def process_vil_data(
     
     rel_lum = l_filtered / l_max
 
-    # 결과 DataFrame 생성
+    # Duty를 고려한 시간 계산
+    duty_fraction = parse_duty_from_filename(filename)
+    if duty_fraction is None:
+        duty_fraction = 1.0  # duty 정보가 없으면 1.0 (변경 없음)
+    
+    # 실제 경과 시간에 duty를 곱하여 duty 고려 시간 계산
+    time_min_duty_adjusted = (t_new / 60.0) * duty_fraction
+
+    # 결과 DataFrame 생성 (보정된 전압 사용)
     res_df = pd.DataFrame({
-        'Time (min)': t_new / 60.0,
-        'Voltage (V)': v_filtered,
+        'Time (min)': time_min_duty_adjusted,
+        'Voltage (V)': v_device_filtered,  # Low-side Sensing 보정된 전압
         'Current density (mA/cm2)': j_ma_cm2,
         'Relative luminance (a.u.)': rel_lum
     })
@@ -157,7 +190,10 @@ def process_vil_data(
         'original_points': len(df),
         'filtered_points': len(res_df),
         'filename': filename,
-        'output_filename': output_filename
+        'output_filename': output_filename,
+        'r_total_ohm': r_total,
+        'r_shunt_ohm': r_shunt,
+        'r_osc_ohm': r_osc
     }
 
     return output.getvalue(), time_shift, metadata

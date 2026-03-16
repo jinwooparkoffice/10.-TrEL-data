@@ -403,6 +403,20 @@ def parse_after_duty_from_filename(filename: str) -> Optional[str]:
     return s if s else None
 
 
+def parse_duty_from_filename(filename: str) -> Optional[float]:
+    """
+    파일명에서 Duty(%) 추출
+    형식: 260223_CC_7000uA_1000Hz_duty25%_1h0min.csv
+    """
+    duty_match = re.search(r'duty\s*(\d+(?:\.\d+)?)\s*%?', filename, re.IGNORECASE)
+    if duty_match:
+        val = float(duty_match.group(1))
+        # duty25 -> 0.25, duty0.5 -> 0.005? 보통 파일명엔 % 단위 사용 (25 = 25%)
+        duty_fraction = val / 100.0 if val > 1.0 else val
+        return duty_fraction
+    return None
+
+
 def analyze_single_file(
     content: str,
     filename: str,
@@ -439,8 +453,16 @@ def analyze_single_file(
     rel_cap = calculate_relative_capacitance(time_shifted, current_density, integration_limit_us, baseline_start_us)
 
     # Result Assembly
-    time_min = parse_minutes_from_filename(filename)
+    time_min_raw = parse_minutes_from_filename(filename)
     after_duty = parse_after_duty_from_filename(filename)
+    
+    # Duty를 고려한 시간 계산
+    duty_fraction = parse_duty_from_filename(filename)
+    if duty_fraction is None:
+        duty_fraction = 1.0  # duty 정보가 없으면 1.0 (변경 없음)
+    
+    # 실제 경과 시간에 duty를 곱하여 duty 고려 시간 계산
+    time_min = time_min_raw * duty_fraction if time_min_raw is not None else None
 
     result = {
         'filename': filename,
