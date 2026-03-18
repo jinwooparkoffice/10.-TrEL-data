@@ -1,8 +1,8 @@
 """
 회로 설정 모듈 (Low-side Sensing)
-- R_shunt: 직렬 센서 저항 (기본값: 100Ω)
-- R_osc: 오실로스코프 내부 저항 (기본값: 50Ω)
-- R_total: 합성 센서 저항 = (R_shunt × R_osc) / (R_shunt + R_osc)
+- 기본 전압 보정 상수: R_total = 33.333 Ω
+- 기본 회로 파라미터: R_shunt = 100Ω, R_osc = 50Ω
+- 사용자 지정 저항값이 주어지면 R_total = (R_shunt × R_osc) / (R_shunt + R_osc)
 """
 from typing import Optional
 
@@ -10,6 +10,7 @@ from typing import Optional
 # 기본값
 DEFAULT_R_SHUNT = 100.0  # Ω
 DEFAULT_R_OSC = 50.0     # Ω
+DEFAULT_R_TOTAL = 33.333  # Ω
 
 
 def calculate_r_total(r_shunt: Optional[float] = None, r_osc: Optional[float] = None) -> float:
@@ -24,6 +25,9 @@ def calculate_r_total(r_shunt: Optional[float] = None, r_osc: Optional[float] = 
     Returns:
         합성 센서 저항 (Ω)
     """
+    if r_shunt is None and r_osc is None:
+        return DEFAULT_R_TOTAL
+
     if r_shunt is None:
         r_shunt = DEFAULT_R_SHUNT
     if r_osc is None:

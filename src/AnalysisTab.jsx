@@ -2,63 +2,95 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { apiUrl } from './api'
 import { scanAnalysisFolder } from './fileUtils'
 
-function RisePreviewChart({ timeRaw, elSignal, tDelay, tSaturation }) {
+function RisePreviewChart({
+  timeRaw,
+  elSignal,
+  tDelay,
+  tSaturation,
+  tRise,
+  analysisMode,
+  axisMode,
+  tangentSlope,
+  tangentIntercept,
+}) {
   const w = 650
   const h = 260
   const pad = { top: 20, right: 20, bottom: 40, left: 55 }
   const plotW = w - pad.left - pad.right
   const plotH = h - pad.top - pad.bottom
 
-    const { pathOrig, xScale, yScale, xTicks } = useMemo(() => {
+  const isTangentMode = analysisMode === 'Tangent'
+
+  const { pathOrig, pathTangent, xScale, yScale, xTicks, xMin, xMax } = useMemo(() => {
     try {
       if (!timeRaw?.length || !elSignal?.length) return {}
-      
-      // 로그 스케일: t > 0 인 데이터만 사용
-      const filtered = timeRaw
-        .map((t, i) => ({ t, y: elSignal[i] }))
-        .filter(({ t, y }) => t > 0 && Number.isFinite(t) && Number.isFinite(y))
-        .sort((a, b) => a.t - b.t)
-        
-      if (filtered.length === 0) return {}
-      
-      // X축: Log Scale (0.1 ~ 100 μs 고정 또는 데이터 범위)
-      // 데이터가 이미 100us 이하로 잘려서 옴
-      const tVals = filtered.map(({ t }) => t)
-      const xMinVal = Math.min(...tVals)
-      const xMaxVal = Math.max(...tVals)
-      
-      // 로그 스케일 범위 설정 (최소 0.1us 부터 100us)
-      // Math.log10(0) = -Infinity, Math.log10(Infinity) = Infinity 방지
-      const logMin = Math.log10(Math.max(xMinVal, 0.1)) 
-      const logMax = Math.log10(Math.max(xMaxVal, 10)) 
-      
-      if (!Number.isFinite(logMin) || !Number.isFinite(logMax)) return {}
 
-      const logRange = logMax - logMin || 1
-      
+      const rawPoints = timeRaw
+        .map((t, i) => ({ t, y: elSignal[i] }))
+        .filter(({ t, y }) => Number.isFinite(t) && Number.isFinite(y))
+        .sort((a, b) => a.t - b.t)
+
+      const filtered = axisMode === 'linear'
+        ? rawPoints
+        : rawPoints.filter(({ t }) => t > 0)
+
+      if (filtered.length === 0) return {}
+
+      const tVals = filtered.map(({ t }) => t)
+      const xMinVal = axisMode === 'linear' ? 0 : Math.min(...tVals)
+      const xMaxVal = axisMode === 'linear' ? 100 : Math.max(...tVals)
       const yVals = filtered.map(({ y }) => y)
-      
-      // Y축 범위 안전 설정 (유효한 값만)
       const validY = yVals.filter(y => Number.isFinite(y))
       const yMin = validY.length ? Math.min(...validY) : 0
       const yMax = validY.length ? Math.max(...validY) : 1
       const yRange = yMax - yMin || 1
-      
-      const xScale = v => {
-        if (v == null || !Number.isFinite(v) || v <= 0) return pad.left
-        const logV = Math.log10(v)
-        if (!Number.isFinite(logV)) return pad.left
-        if (logV < logMin) return pad.left 
-        if (logV > logMax) return pad.left + plotW
-        return pad.left + ((logV - logMin) / logRange) * plotW
-      }
-      
-      const yScale = v => {
-         if (v == null || !Number.isFinite(v)) return pad.top + plotH
-         return pad.top + plotH - ((v - yMin) / yRange) * plotH
+
+      let xScale
+      let xTicks = []
+      if (axisMode === 'linear') {
+        const xRange = xMaxVal - xMinVal || 1
+        xScale = v => {
+          if (v == null || !Number.isFinite(v)) return pad.left
+          return pad.left + ((v - xMinVal) / xRange) * plotW
+        }
+
+        const tickCount = 5
+        for (let i = 0; i <= tickCount; i += 1) {
+          xTicks.push(xMinVal + ((xMaxVal - xMinVal) * i) / tickCount)
+        }
+      } else {
+        const logMin = Math.log10(Math.max(xMinVal, 0.1))
+        const logMax = Math.log10(Math.max(xMaxVal, 10))
+        if (!Number.isFinite(logMin) || !Number.isFinite(logMax)) return {}
+
+        const logRange = logMax - logMin || 1
+        xScale = v => {
+          if (v == null || !Number.isFinite(v) || v <= 0) return pad.left
+          const logV = Math.log10(v)
+          if (!Number.isFinite(logV)) return pad.left
+          if (logV < logMin) return pad.left
+          if (logV > logMax) return pad.left + plotW
+          return pad.left + ((logV - logMin) / logRange) * plotW
+        }
+
+        let p = Math.floor(logMin)
+        let safety = 0
+        const endP = Math.ceil(logMax)
+        while (p <= endP && safety < 100) {
+          const val = Math.pow(10, p)
+          if (val >= Math.pow(10, logMin) && val <= Math.pow(10, logMax)) {
+            xTicks.push(val)
+          }
+          p += 1
+          safety += 1
+        }
       }
 
-      // 유효성 검사 추가: 좌표가 NaN이면 안됨
+      const yScale = v => {
+        if (v == null || !Number.isFinite(v)) return pad.top + plotH
+        return pad.top + plotH - ((v - yMin) / yRange) * plotH
+      }
+
       const ptsOrig = filtered
         .map(({ t, y }) => {
           const x = xScale(t)
@@ -68,30 +100,37 @@ function RisePreviewChart({ timeRaw, elSignal, tDelay, tSaturation }) {
         })
         .filter(pt => pt !== null)
         .join(' L ')
-        
+
       const pathOrig = ptsOrig ? `M ${ptsOrig}` : ''
-      
-      // 로그 눈금: 0.1, 1, 10, 100
-      const xTicks = []
-      let p = Math.floor(logMin)
-      let safety = 0
-      const endP = Math.ceil(logMax)
-      
-      while (p <= endP && safety < 100) {
-        const val = Math.pow(10, p)
-        if (val >= Math.pow(10, logMin) && val <= Math.pow(10, logMax)) {
-           xTicks.push(val)
+
+      let pathTangent = ''
+      if (isTangentMode && Number.isFinite(tangentSlope) && Number.isFinite(tangentIntercept)) {
+        const tangentTimes = []
+        const sampleCount = 120
+        for (let i = 0; i < sampleCount; i += 1) {
+          tangentTimes.push(xMinVal + ((xMaxVal - xMinVal) * i) / (sampleCount - 1))
         }
-        p += 1
-        safety++
+
+        const tangentPts = tangentTimes
+          .map(t => {
+            const y = tangentSlope * t + tangentIntercept
+            const x = xScale(t)
+            const yCoord = yScale(y)
+            if (!Number.isFinite(x) || !Number.isFinite(yCoord)) return null
+            return `${x},${yCoord}`
+          })
+          .filter(Boolean)
+          .join(' L ')
+
+        pathTangent = tangentPts ? `M ${tangentPts}` : ''
       }
-      
-      return { pathOrig, xScale, yScale, xTicks }
+
+      return { pathOrig, pathTangent, xScale, yScale, xTicks, xMin: xMinVal, xMax: xMaxVal }
     } catch (e) {
       console.error('Rise Chart Error:', e)
       return {}
     }
-  }, [timeRaw, elSignal])
+  }, [timeRaw, elSignal, axisMode, isTangentMode, tangentSlope, tangentIntercept])
 
   if (!pathOrig) return (
     <div style={{ height: h, background: '#f5f5f5', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888' }}>
@@ -99,31 +138,46 @@ function RisePreviewChart({ timeRaw, elSignal, tDelay, tSaturation }) {
     </div>
   )
 
+  const showDelayLine = Number.isFinite(tDelay) && xScale && (axisMode === 'linear' || tDelay > 0)
+  const showSaturationLine = Number.isFinite(tSaturation) && xScale && (axisMode === 'linear' || tSaturation > 0)
+  const showSaturationPoint = Number.isFinite(tSaturation) && yScale && (axisMode === 'linear' || tSaturation > 0)
+  const riseLabel = Number.isFinite(tRise) ? `t_rise = ${tRise.toFixed(3)} μs` : 't_rise'
+
   return (
     <svg width={w} height={h} style={{ display: 'block', background: '#fff', borderRadius: 6, border: '1px solid #ddd' }}>
       <path d={pathOrig} fill="none" stroke="#2196f3" strokeWidth={1.5} strokeLinejoin="round" opacity={0.9} />
-      {tDelay != null && xScale && (
+      {pathTangent && (
+        <path d={pathTangent} fill="none" stroke="#9c27b0" strokeWidth={1.8} strokeDasharray="4,2" strokeLinejoin="round" opacity={0.95} />
+      )}
+      {showDelayLine && (
         <line x1={xScale(tDelay)} y1={pad.top} x2={xScale(tDelay)} y2={pad.top + plotH} stroke="#4caf50" strokeWidth={1} strokeDasharray="2,2" />
       )}
-      {tSaturation != null && xScale && (
+      {showSaturationLine && (
         <line x1={xScale(tSaturation)} y1={pad.top} x2={xScale(tSaturation)} y2={pad.top + plotH} stroke="#ff9800" strokeWidth={1} strokeDasharray="2,2" />
+      )}
+      {showSaturationPoint && (
+        <circle cx={xScale(tSaturation)} cy={yScale(1)} r={4} fill="#ff9800" stroke="#fff" strokeWidth={1} />
       )}
       {xTicks?.map((v, i) => (
         <g key={`tick-${i}-${v}`}>
           <line x1={xScale(v)} y1={pad.top + plotH} x2={xScale(v)} y2={pad.top + plotH + 4} stroke="#333" strokeWidth={1} />
           <text x={xScale(v)} y={h - 8} fontSize={9} fill="#333" textAnchor="middle">
-            {v >= 1 ? v : v.toExponential(0)}
+            {axisMode === 'linear' ? v.toFixed(2) : (v >= 1 ? v : v.toExponential(0))}
           </text>
         </g>
       ))}
-      <text x={pad.left} y={h - 10} fontSize={11} fill="#666">Time (μs), Log (0.1~100μs)</text>
-      <text x={w - 100} y={pad.top + 14} fontSize={10} fill="#4caf50">| t_delay</text>
-      <text x={w - 100} y={pad.top + 28} fontSize={10} fill="#ff9800">| t_saturation</text>
+      <text x={pad.left} y={h - 10} fontSize={11} fill="#666">
+        {axisMode === 'linear' ? `Time (μs), Linear (${xMin.toFixed(2)}~${xMax.toFixed(2)})` : 'Time (μs), Log (0.1~100μs)'}
+      </text>
+      {isTangentMode && <text x={w - 140} y={pad.top + 14} fontSize={10} fill="#9c27b0">-- tangent fit</text>}
+      <text x={w - 140} y={pad.top + 28} fontSize={10} fill="#4caf50">| t_delay</text>
+      <text x={w - 140} y={pad.top + 42} fontSize={10} fill="#ff9800">| t_saturation</text>
+      {isTangentMode && <text x={w - 170} y={pad.top + 56} fontSize={10} fill="#555">{riseLabel}</text>}
     </svg>
   )
 }
 
-function DecayPreviewChart({ timeDecay, elSignalLog, tDecayFit, yFitLog }) {
+function LogFitPreviewChart({ timeData, signalLog, timeFit, fitLog, xLabel }) {
   const w = 650
   const h = 260
   const pad = { top: 20, right: 20, bottom: 40, left: 55 }
@@ -132,14 +186,14 @@ function DecayPreviewChart({ timeDecay, elSignalLog, tDecayFit, yFitLog }) {
 
   const { pathOrig, pathFit, xScale, yScale } = useMemo(() => {
     try {
-      if (!timeDecay?.length || !elSignalLog?.length) return {}
+      if (!timeData?.length || !signalLog?.length) return {}
       
       // 유효한 데이터만 필터링 (null, NaN, Infinity 제외)
       // 원본 데이터
       const validPoints = []
-      for (let i = 0; i < timeDecay.length; i++) {
-        const t = timeDecay[i]
-        const v = elSignalLog[i]
+      for (let i = 0; i < timeData.length; i++) {
+        const t = timeData[i]
+        const v = signalLog[i]
         if (t != null && v != null && Number.isFinite(t) && Number.isFinite(v)) {
           validPoints.push({ t, v })
         }
@@ -147,19 +201,31 @@ function DecayPreviewChart({ timeDecay, elSignalLog, tDecayFit, yFitLog }) {
       
       if (validPoints.length === 0) return {}
 
-      const xMin = Math.min(...validPoints.map(p => p.t))
-      const xMax = Math.max(...validPoints.map(p => p.t))
-      const yMin = Math.min(...validPoints.map(p => p.v))
-      const yMax = Math.max(...validPoints.map(p => p.v))
-      
+      const validFit = []
+      if (timeFit?.length && fitLog?.length) {
+        for (let i = 0; i < timeFit.length; i++) {
+          const t = timeFit[i]
+          const v = fitLog[i]
+          if (t != null && v != null && Number.isFinite(t) && Number.isFinite(v)) {
+            validFit.push({ t, v })
+          }
+        }
+      }
+
+      const allPoints = validFit.length > 0 ? [...validPoints, ...validFit] : validPoints
+      const xMin = Math.min(...allPoints.map(p => p.t))
+      const xMax = Math.max(...allPoints.map(p => p.t))
+      const yMin = Math.min(...allPoints.map(p => p.v))
+      const yMax = Math.max(...allPoints.map(p => p.v))
+
       const yRange = yMax - yMin || 1
       const xScale = v => {
-         if (v == null || !Number.isFinite(v)) return pad.left
-         return pad.left + ((v - xMin) / (xMax - xMin || 1)) * plotW
+        if (v == null || !Number.isFinite(v)) return pad.left
+        return pad.left + ((v - xMin) / (xMax - xMin || 1)) * plotW
       }
       const yScale = v => {
-         if (v == null || !Number.isFinite(v)) return pad.top + plotH
-         return pad.top + plotH - ((v - yMin) / yRange) * plotH
+        if (v == null || !Number.isFinite(v)) return pad.top + plotH
+        return pad.top + plotH - ((v - yMin) / yRange) * plotH
       }
       
       const ptsOrig = validPoints
@@ -175,36 +241,24 @@ function DecayPreviewChart({ timeDecay, elSignalLog, tDecayFit, yFitLog }) {
       const pathOrig = ptsOrig ? `M ${ptsOrig}` : ''
       
       let pathFit = ''
-      if (tDecayFit?.length && yFitLog?.length) {
-        // 피팅 데이터도 필터링
-        const validFit = []
-        for (let i = 0; i < tDecayFit.length; i++) {
-          const t = tDecayFit[i]
-          const v = yFitLog[i]
-          if (t != null && v != null && Number.isFinite(t) && Number.isFinite(v)) {
-            validFit.push({ t, v })
-          }
-        }
-        
-        if (validFit.length > 0) {
-          const ptsFit = validFit
-            .map(p => {
-              const x = xScale(p.t)
-              const y = yScale(p.v)
-              if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-              return `${x},${y}`
-            })
-            .filter(pt => pt !== null)
-            .join(' L ')
-          pathFit = ptsFit ? `M ${ptsFit}` : ''
-        }
+      if (validFit.length > 0) {
+        const ptsFit = validFit
+          .map(p => {
+            const x = xScale(p.t)
+            const y = yScale(p.v)
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+            return `${x},${y}`
+          })
+          .filter(pt => pt !== null)
+          .join(' L ')
+        pathFit = ptsFit ? `M ${ptsFit}` : ''
       }
       return { pathOrig, pathFit, xScale, yScale }
     } catch (e) {
-      console.error('Decay Chart Error:', e)
+      console.error('Log Fit Chart Error:', e)
       return {}
     }
-  }, [timeDecay, elSignalLog, tDecayFit, yFitLog])
+  }, [timeData, signalLog, timeFit, fitLog])
 
   if (!pathOrig) return (
     <div style={{ height: h, background: '#f5f5f5', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888' }}>
@@ -216,7 +270,7 @@ function DecayPreviewChart({ timeDecay, elSignalLog, tDecayFit, yFitLog }) {
     <svg width={w} height={h} style={{ display: 'block', background: '#fff', borderRadius: 6, border: '1px solid #ddd' }}>
       <path d={pathOrig} fill="none" stroke="#2196f3" strokeWidth={1.5} strokeLinejoin="round" opacity={0.9} />
       {pathFit && <path d={pathFit} fill="none" stroke="#e91e63" strokeWidth={1.5} strokeDasharray="4,2" strokeLinejoin="round" />}
-      <text x={pad.left} y={h - 10} fontSize={11} fill="#666">Time_Decay (μs)</text>
+      <text x={pad.left} y={h - 10} fontSize={11} fill="#666">{xLabel}</text>
       <text x={pad.left} y={pad.top - 8} fontSize={10} fill="#666">Y: Log scale</text>
       <text x={w - 100} y={pad.top + 14} fontSize={10} fill="#2196f3">— 원본</text>
       <text x={w - 100} y={pad.top + 28} fontSize={10} fill="#e91e63">— 피팅</text>
@@ -229,13 +283,13 @@ export default function AnalysisTab({ backendStatus }) {
   const [analysisFiles, setAnalysisFiles] = useState([])
   const [analysisVilFiles, setAnalysisVilFiles] = useState([])
   const [analysisDirHandle, setAnalysisDirHandle] = useState(null)
+  const [riseMode, setRiseMode] = useState('tangent')
   const [lowPct, setLowPct] = useState(0.1)
   const [highPct, setHighPct] = useState(99)
   const [nDecay, setNDecay] = useState(2)
-  const [decayFitStartUs, setDecayFitStartUs] = useState(4)
-  const [integrationLimitUs, setIntegrationLimitUs] = useState(5)
-  const [baselineStartUs, setBaselineStartUs] = useState(20)
-  const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay'
+  const [spikeNDecay, setSpikeNDecay] = useState(2)
+  const [decayFitStartUs, setDecayFitStartUs] = useState(0)
+  const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay' | 'spike'
   const [analysisPreview, setAnalysisPreview] = useState(null)
   const [analysisError, setAnalysisError] = useState(null)
   const [analysisProcessing, setAnalysisProcessing] = useState(false)
@@ -244,12 +298,23 @@ export default function AnalysisTab({ backendStatus }) {
   const [analysisDone, setAnalysisDone] = useState(false)
   const analysisAbortRef = useRef(null)
 
+  const getDownloadFilename = (response, fallback) => {
+    const disposition = response.headers.get('content-disposition') || ''
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+    if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1])
+    const plainMatch = disposition.match(/filename="?([^"]+)"?/i)
+    if (plainMatch?.[1]) return plainMatch[1]
+    return fallback
+  }
+
   const loadAnalysisPreview = async (fileHandle) => {
     const fd = new FormData()
     fd.append('file', await fileHandle.getFile())
+    fd.append('rise_mode', riseMode)
     fd.append('low_pct', lowPct)
     fd.append('high_pct', highPct)
     fd.append('n_decay', nDecay)
+    fd.append('spike_n_decay', spikeNDecay)
     fd.append('decay_fit_start_us', decayFitStartUs)
 
     const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
@@ -326,7 +391,7 @@ export default function AnalysisTab({ backendStatus }) {
         setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
       })
     }
-  }, [lowPct, highPct, nDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
+  }, [riseMode, lowPct, highPct, nDecay, spikeNDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
 
   const handleAnalysisBatch = async () => {
     if (!analysisDirHandle || analysisFiles.length === 0) return
@@ -348,12 +413,12 @@ export default function AnalysisTab({ backendStatus }) {
       for (const { handle } of analysisVilFiles) {
         fd.append('vil_files', await handle.getFile())
       }
+      fd.append('rise_mode', riseMode)
       fd.append('low_pct', lowPct)
       fd.append('high_pct', highPct)
       fd.append('n_decay', nDecay)
+      fd.append('spike_n_decay', spikeNDecay)
       fd.append('decay_fit_start_us', decayFitStartUs)
-      fd.append('integration_limit_us', integrationLimitUs)
-      fd.append('baseline_start_us', baselineStartUs)
       const res = await fetch(apiUrl('/api/trel-analysis-batch'), { method: 'POST', body: fd, signal: controller.signal })
       const ct = res.headers.get('content-type') || ''
       if (ct.includes('json')) {
@@ -361,7 +426,8 @@ export default function AnalysisTab({ backendStatus }) {
         throw new Error(data.error || '분석 실패')
       }
       const blob = await res.blob()
-      const fh = await analysisDirHandle.getFileHandle('TrEL_Analysis.xlsx', { create: true })
+      const outputFilename = getDownloadFilename(res, 'TrEL_Analysis.xlsx')
+      const fh = await analysisDirHandle.getFileHandle(outputFilename, { create: true })
       const w = await fh.createWritable()
       await w.write(blob)
       await w.close()
@@ -406,16 +472,47 @@ export default function AnalysisTab({ backendStatus }) {
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '24px', marginBottom: '20px' }}>
             <div>
+              <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>상승부 분석 모드</label>
+              <select value={riseMode} onChange={e => setRiseMode(e.target.value)} style={{ padding: '6px 8px', minWidth: '120px' }}>
+                <option value="threshold">Threshold</option>
+                <option value="tangent">Tangent</option>
+              </select>
+            </div>
+            <div>
               <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Low% (절대값, 예: 1 → 0.01)</label>
-              <input type="number" value={lowPct} onChange={e => setLowPct(Number(e.target.value))} step={0.5} min={0} max={100} style={{ width: '80px', padding: '6px 8px' }} />
+              <input
+                type="number"
+                value={lowPct}
+                onChange={e => setLowPct(Number(e.target.value))}
+                step={0.5}
+                min={0}
+                max={100}
+                disabled={riseMode === 'tangent'}
+                style={{ width: '80px', padding: '6px 8px' }}
+              />
             </div>
             <div>
               <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>High% (절대값, 예: 90 → 0.9)</label>
-              <input type="number" value={highPct} onChange={e => setHighPct(Number(e.target.value))} step={0.5} min={0} max={100} style={{ width: '80px', padding: '6px 8px' }} />
+              <input
+                type="number"
+                value={highPct}
+                onChange={e => setHighPct(Number(e.target.value))}
+                step={0.5}
+                min={0}
+                max={100}
+                disabled={riseMode === 'tangent'}
+                style={{ width: '80px', padding: '6px 8px' }}
+              />
             </div>
             <div>
               <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Decay 지수 개수 (n)</label>
               <select value={nDecay} onChange={e => setNDecay(Number(e.target.value))} style={{ padding: '6px 8px' }}>
+                {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Negative Spike 지수 개수 (n)</label>
+              <select value={spikeNDecay} onChange={e => setSpikeNDecay(Number(e.target.value))} style={{ padding: '6px 8px' }}>
                 {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
               </select>
             </div>
@@ -432,21 +529,23 @@ export default function AnalysisTab({ backendStatus }) {
               />
               <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>기본값 4</span>
             </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Rel. Capacitance 적분 구간 (μs)</label>
-              <input type="number" value={integrationLimitUs} onChange={e => setIntegrationLimitUs(Number(e.target.value))} step={0.5} min={0.5} max={50} style={{ width: '80px', padding: '6px 8px' }} />
-              <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>t=0~적분 끝 (보통 2~5)</span>
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>베이스라인 시작 (μs)</label>
-              <input type="number" value={baselineStartUs} onChange={e => setBaselineStartUs(Number(e.target.value))} step={1} min={5} max={100} style={{ width: '80px', padding: '6px 8px' }} />
-              <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>t&gt;이 값 이후 평균</span>
-            </div>
           </div>
+          {riseMode === 'tangent' && (
+            <p style={{ marginTop: '-8px', marginBottom: '16px', fontSize: '0.85em', color: '#666' }}>
+              Tangent 모드는 raw 데이터에 대해 약 17포인트 sliding window 선형 회귀로 최대 기울기 접선을 찾습니다. Low%/High% 값은 이 모드에서 사용되지 않습니다.
+            </p>
+          )}
 
           {analysisPreview && (
             <div style={{ marginBottom: '20px' }}>
-              <h4 style={{ marginBottom: '8px' }}>미리보기: {analysisPreview.filename}</h4>
+              <h4 style={{ marginBottom: '8px' }}>
+                미리보기: {analysisPreview.filename}
+                {analysisPreview.rise?.analysis_mode && (
+                  <span style={{ marginLeft: '8px', fontSize: '0.9em', color: '#1565c0', fontWeight: 500 }}>
+                    ({analysisPreview.rise.analysis_mode} Mode)
+                  </span>
+                )}
+              </h4>
               <div style={{ display: 'flex', gap: '4px', marginBottom: '12px', borderBottom: '1px solid #ddd' }}>
                 <button
                   type="button"
@@ -476,27 +575,65 @@ export default function AnalysisTab({ backendStatus }) {
                 >
                   Decay (Log)
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewSubTab('spike')}
+                  style={{
+                    padding: '8px 16px',
+                    border: 'none',
+                    background: previewSubTab === 'spike' ? '#e3f2fd' : 'transparent',
+                    borderBottom: previewSubTab === 'spike' ? '2px solid #2196f3' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontSize: '0.9em',
+                  }}
+                >
+                  Negative Spike Fit
+                </button>
               </div>
               {previewSubTab === 'rise' && analysisPreview.rise && (
                 <RisePreviewChart
                   timeRaw={analysisPreview.rise.time_raw}
                   elSignal={analysisPreview.rise.el_signal_rise}
+                  analysisMode={analysisPreview.rise.analysis_mode}
+                  axisMode={analysisPreview.rise.axis_mode}
                   tDelay={analysisPreview.rise.t_delay}
+                  tRise={analysisPreview.rise.t_rise}
                   tSaturation={analysisPreview.rise.t_saturation}
+                  tangentSlope={analysisPreview.rise.tangent_slope}
+                  tangentIntercept={analysisPreview.rise.tangent_intercept}
                 />
               )}
               {previewSubTab === 'decay' && analysisPreview.decay && (
-                <DecayPreviewChart
-                  timeDecay={analysisPreview.decay.time_decay}
-                  elSignalLog={analysisPreview.decay.el_signal_decay_log}
-                  tDecayFit={analysisPreview.decay.t_decay_fit}
-                  yFitLog={analysisPreview.decay.y_fit_log}
+                <LogFitPreviewChart
+                  timeData={analysisPreview.decay.time_decay}
+                  signalLog={analysisPreview.decay.el_signal_decay_log}
+                  timeFit={analysisPreview.decay.t_decay_fit}
+                  fitLog={analysisPreview.decay.y_fit_log}
+                  xLabel="Time_Decay (μs)"
+                />
+              )}
+              {previewSubTab === 'spike' && analysisPreview.negative_spike && (
+                <LogFitPreviewChart
+                  timeData={analysisPreview.negative_spike.time_spike}
+                  signalLog={analysisPreview.negative_spike.spike_signal_log}
+                  timeFit={analysisPreview.negative_spike.t_spike_fit}
+                  fitLog={analysisPreview.negative_spike.y_spike_fit_log}
+                  xLabel="Time_Negative Spike (μs)"
                 />
               )}
               {analysisPreview.tau_avg != null && (
                 <p style={{ marginTop: '8px', fontSize: '0.9em', color: '#666' }}>
                   τ_avg = {Number.isFinite(analysisPreview.tau_avg) ? analysisPreview.tau_avg.toFixed(4) : '?'} μs
                   {analysisPreview.tau_list?.length > 0 && ` (${analysisPreview.tau_list.map((t, i) => `τ${i + 1}=${Number.isFinite(t) ? t.toFixed(4) : '?'}`).join(', ')})`}
+                </p>
+              )}
+              {previewSubTab === 'spike' && analysisPreview.negative_spike?.tau_avg != null && (
+                <p style={{ marginTop: '8px', fontSize: '0.9em', color: '#666' }}>
+                  Spike τ_avg = {Number.isFinite(analysisPreview.negative_spike.tau_avg) ? analysisPreview.negative_spike.tau_avg.toFixed(4) : '?'} μs
+                  {analysisPreview.negative_spike.tau_list?.length > 0 && ` (${analysisPreview.negative_spike.tau_list.map((t, i) => `τ${i + 1}=${Number.isFinite(t) ? t.toFixed(4) : '?'}`).join(', ')})`}
+                  {analysisPreview.negative_spike.peak_time_us != null && `, peak@raw = ${Number.isFinite(analysisPreview.negative_spike.peak_time_us) ? analysisPreview.negative_spike.peak_time_us.toFixed(4) : '?'} μs`}
+                  {analysisPreview.negative_spike.fit_start_us != null && `, fit start = ${Number.isFinite(analysisPreview.negative_spike.fit_start_us) ? analysisPreview.negative_spike.fit_start_us.toFixed(4) : '?'} μs`}
+                  {analysisPreview.negative_spike.integral != null && `, ∫Idt = ${Number.isFinite(analysisPreview.negative_spike.integral) ? analysisPreview.negative_spike.integral.toFixed(4) : '?'} nC/cm²`}
                 </p>
               )}
             </div>

@@ -50,6 +50,7 @@ def parse_trel_csv_frame(content: str) -> pd.DataFrame:
     - Shifted Time (μs)
     - Normalized intensity (a.u.)
     - Current density (mA cm⁻²)
+    - Corrected current density (mA cm⁻²)
     """
     try:
         df = pd.read_csv(
@@ -64,15 +65,16 @@ def parse_trel_csv_frame(content: str) -> pd.DataFrame:
         if df.shape[1] < 3:
             return pd.DataFrame()
 
-        if df.shape[1] == 3:
-            df[3] = np.nan
+        while df.shape[1] < 5:
+            df[df.shape[1]] = np.nan
 
-        df = df.iloc[:, :4].copy()
+        df = df.iloc[:, :5].copy()
         df.columns = [
             'Time (μs)',
             'Shifted Time (μs)',
             'Normalized intensity (a.u.)',
             'Current density (mA cm⁻²)',
+            'Corrected current density (mA cm⁻²)',
         ]
         return df
     except Exception:

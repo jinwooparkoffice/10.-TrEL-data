@@ -8,11 +8,12 @@ TrEL (Transient Electroluminescence) 오실로스코프 데이터 처리
     - 오실로스코프 입력 임피던스 50Ω과 병렬 연결됨
     - R_TOTAL = (100 * 50) / (100 + 50) = 33.33Ω
   - Area: 4.3 mm² (기본값)
-- 출력: 
+- 출력:
   - Time (μs): Raw Time (t=0 at Trigger/Voltage ON)
   - Shifted Time (μs): Decay Analysis Time (t=0 at Voltage OFF)
   - Norm. Luminance
   - Current Density
+  - Corrected Current Density (symmetric capacitance cancellation)
 """
 import re
 import io
@@ -192,21 +193,32 @@ def process_osc_data(
         imax = np.argmax(l_norm)
         shift_offset_us = t_ms[imax] * 1000.0
 
-    # 결과 DataFrame 생성
+    # 4. Symmetric capacitance cancellation
+    # I_corrected(t_on + Δt) = I_measured(t_on + Δt) + I_measured(t_off + Δt)
+    # Raw time axis uses t=0 at voltage ON, so pair current at t with current at t + t_on.
     time_us = t_ms * 1000.0
     shifted_us = time_us - shift_offset_us
+    paired_times_us = time_us + shift_offset_us
+    j_off_interp = np.interp(paired_times_us, time_us, j_raw, left=np.nan, right=np.nan)
+    j_corrected = np.where(np.isfinite(j_off_interp), j_raw + j_off_interp, np.nan)
 
+    # 결과 DataFrame 생성
+
+    # ASCII-safe 컬럼명 사용 (CSV 인코딩 시 μ, ⁻² 등 유니코드 깨짐 방지)
     out_df = pd.DataFrame({
-        'Time (μs)': time_us,
-        'Shifted Time (μs)': shifted_us,
+        'Time (us)': time_us,
+        'Shifted Time (us)': shifted_us,
         'Normalized intensity (a.u.)': l_norm,
-        'Current density (mA cm⁻²)': j_raw
+        'Current density (mA/cm2)': j_raw,
+        'Corrected current density (mA/cm2)': j_corrected,
     })
     
-    # 출력 CSV 생성
+    # 출력 CSV 생성 (헤더는 ASCII-safe로 저장)
     output = io.StringIO()
     # 빈 줄 2개 추가 (기존 포맷 유지)
-    output.write('Time (μs),Shifted Time (μs),Normalized intensity (a.u.),Current density (mA cm⁻²)\n\n\n')
+    output.write(
+        'Time (us),Shifted Time (us),Normalized intensity (a.u.),Current density (mA/cm2),Corrected current density (mA/cm2)\n\n\n'
+    )
     # DataFrame 데이터만 쓰기 (헤더 제외)
     out_df.to_csv(output, index=False, header=False, float_format='%.6f')
 
@@ -223,6 +235,7 @@ def process_osc_data(
         'norm_end_ns': norm_end_ns,
         'frequency_hz': frequency_hz,
         'duty_fraction': duty_fraction,
+        'shift_offset_us': shift_offset_us,
         'r_total_ohm': r_total,
         'r_shunt_ohm': r_shunt,
         'r_osc_ohm': r_osc,

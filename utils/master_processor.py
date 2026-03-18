@@ -33,9 +33,9 @@ def parse_vil_processed(content: str) -> pd.DataFrame:
             res.columns = ['Time (min)', 'Relative luminance (a.u.)'] # Normalize names
             return res.dropna()
             
-        # 컬럼명이 다를 경우 인덱스로 접근 (Fallback: 0, 3)
-        if len(df.columns) >= 4:
-            res = df.iloc[:, [0, 3]].copy()
+        # 컬럼명이 다를 경우 인덱스로 접근 (Fallback: 0=Time, 1=Relative luminance)
+        if len(df.columns) >= 2:
+            res = df.iloc[:, [0, 1]].copy()
             res.columns = ['Time (min)', 'Relative luminance (a.u.)']
             return res.dropna()
             
@@ -162,7 +162,7 @@ def process_master(
     wb = openpyxl.Workbook(write_only=True)
     ws = wb.create_sheet(title="TrEL_Master")
     
-    col_headers = ['Time (μs)', 'Shifted Time (μs)', 'Normalized intensity (a.u.)', 'Current density (mA cm⁻²)']
+    col_headers = ['Time (μs)', 'Shifted Time (μs)', 'Normalized intensity (a.u.)', 'Corrected current density (mA cm⁻²)']
     
     # 1행: 헤더
     row1 = []
@@ -195,6 +195,21 @@ def process_master(
             df = pd.DataFrame()
             
         if not df.empty:
+            if 'Corrected current density (mA cm⁻²)' in df.columns:
+                df = df[[
+                    'Time (μs)',
+                    'Shifted Time (μs)',
+                    'Normalized intensity (a.u.)',
+                    'Corrected current density (mA cm⁻²)',
+                ]].copy()
+            else:
+                df = df[[
+                    'Time (μs)',
+                    'Shifted Time (μs)',
+                    'Normalized intensity (a.u.)',
+                    'Current density (mA cm⁻²)',
+                ]].copy()
+                df.columns = col_headers
             max_len = max(max_len, len(df))
             data_frames.append(df)
             if filename:

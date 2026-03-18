@@ -165,11 +165,12 @@ def process_vil_data(
     time_min_duty_adjusted = (t_new / 60.0) * duty_fraction
 
     # 결과 DataFrame 생성 (보정된 전압 사용)
+    # 컬럼 순서: 1열 Time, 2열 Luminance, 3열 Voltage, 4열 Current density
     res_df = pd.DataFrame({
         'Time (min)': time_min_duty_adjusted,
+        'Relative luminance (a.u.)': rel_lum,
         'Voltage (V)': v_device_filtered,  # Low-side Sensing 보정된 전압
         'Current density (mA/cm2)': j_ma_cm2,
-        'Relative luminance (a.u.)': rel_lum
     })
 
     # 출력 CSV 생성

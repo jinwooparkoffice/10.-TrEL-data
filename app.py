@@ -20,8 +20,10 @@ from utils.master_processor import process_master
 from utils.trel_common import parse_minutes_from_filename
 from utils.trel_analysis import (
     analyze_single_file,
+    format_rise_analysis_mode,
     get_preview_data as get_trel_preview,
     parse_vil_processed_for_voltage,
+    parse_vil_processed_for_voltage_luminance,
 )
 
 app = Flask(__name__)
@@ -82,36 +84,41 @@ def csv_text_to_xlsx_bytes(csv_text: str) -> bytes:
 
 def parse_vil_uploaded_for_voltage(file_storage):
     """업로드된 VIL_processed 파일(CSV/XLSX)에서 (time_min, voltage) 목록 추출."""
+    data = parse_vil_uploaded_for_voltage_luminance(file_storage)
+    return [(t, v) for t, v, _ in data] if data else []
+
+
+def parse_vil_uploaded_for_voltage_luminance(file_storage):
+    """업로드된 VIL_processed 파일(CSV/XLSX)에서 (time_min, voltage, relative_luminance) 목록 추출."""
     filename = (file_storage.filename or '').lower()
     raw = file_storage.read()
-    
+
     if filename.endswith('.xlsx'):
         try:
             df = pd.read_excel(io.BytesIO(raw))
-            # 컬럼명 확인 및 데이터 추출
-            # 필요한 컬럼: Time (min), Voltage (V)
-            # 대소문자 무시하고 찾기 위해 컬럼명 정규화
             df.columns = df.columns.str.strip()
-            
             time_col = next((c for c in df.columns if 'Time (min)' in c), None)
             volt_col = next((c for c in df.columns if 'Voltage' in c), None)
-            
+            lum_col = next((c for c in df.columns if 'Relative luminance' in c or 'Luminance' in c), None)
+
+            if time_col and volt_col and lum_col:
+                return list(zip(df[time_col], df[volt_col], df[lum_col]))
             if time_col and volt_col:
-                # (t, v) 튜플 리스트 반환
-                return list(zip(df[time_col], df[volt_col]))
-                
-            # 컬럼 못 찾으면 첫 번째, 두 번째 컬럼 사용 (Fallback)
-            if len(df.columns) >= 2:
-                # 첫 행이 헤더일 수 있으니 숫자가 아닌 경우 제외
+                return [(t, v, float('nan')) for t, v in zip(df[time_col], df[volt_col])]
+
+            # Fallback: 0=Time, 1=Luminance, 2=Voltage (새 컬럼 순서)
+            if len(df.columns) >= 3:
                 df = df.apply(pd.to_numeric, errors='coerce').dropna()
-                return list(zip(df.iloc[:, 0], df.iloc[:, 1]))
-                
+                return list(zip(df.iloc[:, 0], df.iloc[:, 2], df.iloc[:, 1]))
+            if len(df.columns) >= 2:
+                df = df.apply(pd.to_numeric, errors='coerce').dropna()
+                return [(t, v, float('nan')) for t, v in zip(df.iloc[:, 0], df.iloc[:, 1])]
         except Exception:
             pass
         return []
 
     content = raw.decode('utf-8', errors='replace')
-    _, data = parse_vil_processed_for_voltage(content)
+    _, data = parse_vil_processed_for_voltage_luminance(content)
     return data
 
 # 요청 크기 제한
@@ -447,7 +454,7 @@ def create_master():
 def trel_analysis_preview():
     """
     TrEL 배치 분석 미리보기 (첫 파일)
-    - low_pct, high_pct, n_decay, decay_fit_start_us
+    - low_pct, high_pct, n_decay, rise_mode, decay_fit_start_us
     """
     try:
         f = request.files.get('file')
@@ -456,9 +463,19 @@ def trel_analysis_preview():
         low_pct = float(request.form.get('low_pct', 0.1))
         high_pct = float(request.form.get('high_pct', 99))
         n_decay = int(request.form.get('n_decay', 2))
-        decay_fit_start_us = float(request.form.get('decay_fit_start_us', 4.0))
+        spike_n_decay = int(request.form.get('spike_n_decay', 2))
+        rise_mode = request.form.get('rise_mode', 'tangent')
+        decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
         content = f.read().decode('utf-8', errors='replace')
-        preview = get_trel_preview(content, low_pct, high_pct, n_decay, decay_fit_start_us)
+        preview = get_trel_preview(
+            content,
+            low_pct,
+            high_pct,
+            n_decay,
+            spike_n_decay=spike_n_decay,
+            rise_mode=rise_mode,
+            decay_fit_start_us=decay_fit_start_us,
+        )
         if preview.get('error'):
             return jsonify({'success': False, 'error': preview['error']}), 400
         return jsonify({'success': True, 'filename': f.filename, **preview})
@@ -485,45 +502,48 @@ def trel_analysis_batch():
         low_pct = float(request.form.get('low_pct', 0.1))
         high_pct = float(request.form.get('high_pct', 99))
         n_decay = int(request.form.get('n_decay', 2))
-        decay_fit_start_us = float(request.form.get('decay_fit_start_us', 4.0))
-        integration_limit_us = float(request.form.get('integration_limit_us', 5.0))
-        baseline_start_us = float(request.form.get('baseline_start_us', 20.0))
+        spike_n_decay = int(request.form.get('spike_n_decay', 2))
+        rise_mode = request.form.get('rise_mode', 'tangent')
+        decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
 
         if not files:
             return jsonify({'success': False, 'error': 'CSV 파일이 없습니다.'}), 400
 
-        vil_time_voltage = []
+        vil_time_voltage_lum = []
         for vf in vil_files:
-            data = parse_vil_uploaded_for_voltage(vf)
+            data = parse_vil_uploaded_for_voltage_luminance(vf)
             if data:
-                vil_time_voltage.extend(data)
-        if vil_time_voltage:
-            seen_t = {}
-            for t, v in sorted(vil_time_voltage, key=lambda x: x[0]):
-                if t not in seen_t:
-                    seen_t[t] = v
-            vil_time_voltage = [(t, seen_t[t]) for t in sorted(seen_t.keys())]
+                vil_time_voltage_lum.extend(data)
+        if vil_time_voltage_lum:
+            seen = {}
+            for t, v, lum in sorted(vil_time_voltage_lum, key=lambda x: x[0]):
+                if t not in seen:
+                    seen[t] = (v, lum)
+            vil_time_voltage_lum = [(t, seen[t][0], seen[t][1]) for t in sorted(seen.keys())]
 
         results = []
         preview_seed_popt = None
+        preview_seed_spike_popt = None
         for idx, f in enumerate(files):
             content = f.read().decode('utf-8', errors='replace')
             r = analyze_single_file(
                 content, f.filename, low_pct, high_pct, n_decay,
-                vil_time_voltage=vil_time_voltage if vil_time_voltage else None,
+                spike_n_decay=spike_n_decay,
+                rise_mode=rise_mode,
+                vil_time_voltage=vil_time_voltage_lum if vil_time_voltage_lum else None,
                 decay_fit_start_us=decay_fit_start_us,
                 decay_initial_params=preview_seed_popt if idx > 0 else None,
-                integration_limit_us=integration_limit_us,
-                baseline_start_us=baseline_start_us,
+                spike_initial_params=preview_seed_spike_popt if idx > 0 else None,
             )
             results.append(r)
             # First file (preview source) fit result is reused
             # as initial guess for remaining files.
             if preview_seed_popt is None and isinstance(r.get('popt'), list):
                 preview_seed_popt = r.get('popt')
+            if preview_seed_spike_popt is None and isinstance(r.get('spike_popt'), list):
+                preview_seed_spike_popt = r.get('spike_popt')
 
         has_voltage = any(row.get('voltage') is not None for row in results)
-        has_capacitance = any(row.get('relative_capacitance') is not None for row in results)
         if has_voltage:
             results.sort(key=lambda r: (r.get('time_min') is None, r.get('time_min') or float('inf')))
         else:
@@ -536,12 +556,10 @@ def trel_analysis_batch():
         for r in results:
             row = {}
             row[first_col_name] = r.get('time_min') if has_voltage else r.get('after_duty')
-            row['fit_start_us (μs)'] = decay_fit_start_us
             
             if has_voltage:
                 row['Voltage (V)'] = r.get('voltage')
-            if has_capacitance:
-                row['Rel. Capacitance (nC/cm²)'] = r.get('relative_capacitance')
+                row['Relative luminance (a.u.)'] = r.get('relative_luminance')
                 
             row['t_delay (μs)'] = r.get('t_delay')
             row['t_rise (μs)'] = r.get('t_rise')
@@ -552,27 +570,39 @@ def trel_analysis_batch():
                 row[f'f_{i}'] = r.get(f'f_{i}')
                 
             row['tau_avg (μs)'] = r.get('tau_avg')
+            for i in range(1, spike_n_decay + 1):
+                row[f'Spike A_{i} (mA cm⁻²)'] = r.get(f'spike_a_{i}')
+                row[f'Spike tau_{i} (μs)'] = r.get(f'spike_tau_{i}')
+            row['Spike tau_avg (μs)'] = r.get('spike_tau_avg')
+            row['Spike Integral (nC/cm²)'] = r.get('spike_integral')
+            row['Rise Slope (a.u./μs)'] = r.get('rise_slope')
             excel_rows.append(row)
             
         df = pd.DataFrame(excel_rows)
         
-        # 컬럼 순서 지정
-        cols = [first_col_name, 'fit_start_us (μs)']
-        if has_voltage: cols.append('Voltage (V)')
-        if has_capacitance: cols.append('Rel. Capacitance (nC/cm²)')
+        # 컬럼 순서 지정 (Voltage 오른쪽에 Relative luminance)
+        cols = [first_col_name]
+        if has_voltage:
+            cols.append('Voltage (V)')
+            cols.append('Relative luminance (a.u.)')
         cols.extend(['t_delay (μs)', 't_rise (μs)', 't_saturation (μs)'])
         for i in range(1, n_decay + 1):
             cols.extend([f'tau_{i} (μs)', f'f_{i}'])
         cols.append('tau_avg (μs)')
+        for i in range(1, spike_n_decay + 1):
+            cols.extend([f'Spike A_{i} (mA cm⁻²)', f'Spike tau_{i} (μs)'])
+        cols.extend(['Spike tau_avg (μs)', 'Spike Integral (nC/cm²)', 'Rise Slope (a.u./μs)'])
         
         # 존재하는 컬럼만 선택
         cols = [c for c in cols if c in df.columns]
         df = df[cols]
 
+        rise_mode_label = format_rise_analysis_mode(rise_mode)
+        sheet_name = f'TrEL Analysis ({rise_mode_label})'
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='TrEL Analysis')
-            ws = writer.sheets['TrEL Analysis']
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+            ws = writer.sheets[sheet_name]
             
             # 헤더 볼드 처리 및 컬럼 너비 조정
             for cell in ws[1]:
@@ -582,10 +612,14 @@ def trel_analysis_batch():
                 w = 18 if i == 1 and not has_voltage else 14
                 ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
 
+        rise_mode_token = rise_mode_label.replace(' ', '')
+        fit_start_token = str(decay_fit_start_us).replace('.', 'p')
+        output_filename = f'TrEL_Analysis_{rise_mode_token}_fitStart{fit_start_token}us.xlsx'
+
         return Response(
             output.getvalue(),
             mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            headers={'Content-Disposition': 'attachment; filename=TrEL_Analysis.xlsx'}
+            headers={'Content-Disposition': f'attachment; filename={output_filename}'}
         )
     except Exception as e:
         print(f"[trel_analysis_batch] Error: {e}", flush=True)
