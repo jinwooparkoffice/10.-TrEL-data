@@ -162,7 +162,13 @@ def process_master(
     wb = openpyxl.Workbook(write_only=True)
     ws = wb.create_sheet(title="TrEL_Master")
     
-    col_headers = ['Time (μs)', 'Shifted Time (μs)', 'Normalized intensity (a.u.)', 'Corrected current density (mA cm⁻²)']
+    col_headers = [
+        'Time (μs)',
+        'Shifted Time (μs)',
+        'Normalized intensity (a.u.)',
+        'Current density (mA cm⁻²)',
+        'Corrected current density (mA cm⁻²)',
+    ]
     
     # 1행: 헤더
     row1 = []
@@ -176,7 +182,7 @@ def process_master(
     # 3행: 퍼센트 라벨
     row3 = []
     for pct in pct_labels:
-        row3.extend([pct] * 4)
+        row3.extend([pct] * len(col_headers))
     ws.append(row3)
     
     # 데이터 준비
@@ -195,21 +201,14 @@ def process_master(
             df = pd.DataFrame()
             
         if not df.empty:
-            if 'Corrected current density (mA cm⁻²)' in df.columns:
-                df = df[[
-                    'Time (μs)',
-                    'Shifted Time (μs)',
-                    'Normalized intensity (a.u.)',
-                    'Corrected current density (mA cm⁻²)',
-                ]].copy()
+            base_cols = ['Time (μs)', 'Shifted Time (μs)', 'Normalized intensity (a.u.)']
+            curr_col = 'Current density (mA cm⁻²)'
+            corr_col = 'Corrected current density (mA cm⁻²)'
+            if corr_col in df.columns:
+                df = df[base_cols + [curr_col, corr_col]].copy()
             else:
-                df = df[[
-                    'Time (μs)',
-                    'Shifted Time (μs)',
-                    'Normalized intensity (a.u.)',
-                    'Current density (mA cm⁻²)',
-                ]].copy()
-                df.columns = col_headers
+                df = df[base_cols + [curr_col]].copy()
+                df[corr_col] = np.nan
             max_len = max(max_len, len(df))
             data_frames.append(df)
             if filename:
@@ -219,7 +218,6 @@ def process_master(
                     'percent': pct_labels[decay_thresholds.index(ratio)],
                 })
         else:
-            # 빈 DataFrame (4개 컬럼)
             data_frames.append(pd.DataFrame(columns=col_headers))
             
     # 4행부터: 데이터 쓰기

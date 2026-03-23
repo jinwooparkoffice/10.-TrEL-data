@@ -83,6 +83,44 @@ export const scanBatchFolder = async (dir) => {
   return { vilFiles, oscFiles, existingTrel }
 }
 
+/** 파일명에서 측정 시간(분) 추출. duty25%_1h0min, 10min 등 형식 지원 */
+export const parseMinutesFromFilename = (filename) => {
+  const base = (filename || '').replace(/\.[^.]+$/, '')
+  const pats = [
+    /(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*min(?:$|[_\-\s])/gi,
+    /(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*m(?:$|[_\-\s])/gi,
+    /(?:^|[_\-\s])(\d+)\s*h(?:$|[_\-\s])/gi,
+  ]
+  for (const re of pats) {
+    const m = [...base.matchAll(re)]
+    if (m.length) {
+      const g = m[m.length - 1]
+      if (g[2] != null) {
+        const h = g[1] ? parseInt(g[1], 10) : 0
+        return h * 60 + parseInt(g[2], 10)
+      }
+      if (g[1]) return parseInt(g[1], 10) * 60
+    }
+  }
+  return null
+}
+
+/** 10분에 가장 가까운 파일 인덱스. 없으면 0 */
+export const indexClosestTo10Min = (files) => {
+  if (!files?.length) return 0
+  let best = 0
+  let bestDiff = Math.abs((parseMinutesFromFilename(files[0].name) ?? 10) - 10)
+  for (let i = 1; i < files.length; i++) {
+    const tm = parseMinutesFromFilename(files[i].name) ?? 10
+    const d = Math.abs(tm - 10)
+    if (d < bestDiff) {
+      bestDiff = d
+      best = i
+    }
+  }
+  return best
+}
+
 export const scanAnalysisFolder = async (dir) => {
   const analysisFiles = []
   const analysisVilFiles = []

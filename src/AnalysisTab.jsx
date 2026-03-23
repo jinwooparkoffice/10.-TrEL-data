@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { apiUrl } from './api'
-import { scanAnalysisFolder } from './fileUtils'
+import { scanAnalysisFolder, indexClosestTo10Min } from './fileUtils'
 
 function RisePreviewChart({
   timeRaw,
@@ -289,6 +289,8 @@ export default function AnalysisTab({ backendStatus }) {
   const [nDecay, setNDecay] = useState(2)
   const [spikeNDecay, setSpikeNDecay] = useState(2)
   const [decayFitStartUs, setDecayFitStartUs] = useState(0)
+  const [decayInitialParamsInput, setDecayInitialParamsInput] = useState('')
+  const [spikeInitialParamsInput, setSpikeInitialParamsInput] = useState('')
   const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay' | 'spike'
   const [analysisPreview, setAnalysisPreview] = useState(null)
   const [analysisError, setAnalysisError] = useState(null)
@@ -296,7 +298,22 @@ export default function AnalysisTab({ backendStatus }) {
   const [analysisSelectingFolder, setAnalysisSelectingFolder] = useState(false)
   const [analysisScanningFolder, setAnalysisScanningFolder] = useState(false)
   const [analysisDone, setAnalysisDone] = useState(false)
+  const [analysisProgress, setAnalysisProgress] = useState({ current: 0, total: 0, filename: '', stage: '' })
   const analysisAbortRef = useRef(null)
+
+  const parseInitialParams = (str) => {
+    if (!str || typeof str !== 'string') return null
+    const s = str.trim()
+    if (!s) return null
+    try {
+      const arr = JSON.parse(s)
+      if (!Array.isArray(arr) || arr.length < 3) return null  // n=1: [A1,tau1,y0]
+      const parsed = arr.map(x => (typeof x === 'number' && Number.isFinite(x)) ? x : parseFloat(x))
+      return parsed.every(x => Number.isFinite(x)) ? parsed : null
+    } catch {
+      return null
+    }
+  }
 
   const getDownloadFilename = (response, fallback) => {
     const disposition = response.headers.get('content-disposition') || ''
@@ -307,7 +324,8 @@ export default function AnalysisTab({ backendStatus }) {
     return fallback
   }
 
-  const loadAnalysisPreview = async (fileHandle) => {
+  const loadAnalysisPreview = async (fileHandle, opts = {}) => {
+    const { decayParams, spikeParams } = opts
     const fd = new FormData()
     fd.append('file', await fileHandle.getFile())
     fd.append('rise_mode', riseMode)
@@ -316,6 +334,8 @@ export default function AnalysisTab({ backendStatus }) {
     fd.append('n_decay', nDecay)
     fd.append('spike_n_decay', spikeNDecay)
     fd.append('decay_fit_start_us', decayFitStartUs)
+    if (decayParams?.length) fd.append('decay_initial_params', JSON.stringify(decayParams))
+    if (spikeParams?.length) fd.append('spike_initial_params', JSON.stringify(spikeParams))
 
     const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
     const data = await res.json()
@@ -384,20 +404,45 @@ export default function AnalysisTab({ backendStatus }) {
     }
   }
 
+  const refreshPreview = (opts = {}) => {
+    if (!analysisFiles?.length) return
+    const idx = indexClosestTo10Min(analysisFiles)
+    const decayParams = opts.decayParams ?? parseInitialParams(decayInitialParamsInput)
+    const spikeParams = opts.spikeParams ?? parseInitialParams(spikeInitialParamsInput)
+    loadAnalysisPreview(analysisFiles[idx].handle, { decayParams, spikeParams }).catch(err => {
+      setAnalysisPreview(null)
+      setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
+    })
+  }
+
   useEffect(() => {
     if (analysisFolderReady && analysisFiles.length > 0) {
-      loadAnalysisPreview(analysisFiles[0].handle).catch(err => {
-        setAnalysisPreview(null)
-        setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
-      })
+      refreshPreview()
     }
   }, [riseMode, lowPct, highPct, nDecay, spikeNDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
+
+  useEffect(() => {
+    if (!analysisProcessing) return
+    const fetchProgress = async () => {
+      try {
+        const res = await fetch(apiUrl('/api/trel-analysis-progress'))
+        const data = await res.json()
+        setAnalysisProgress(data)
+      } catch {
+        // ignore
+      }
+    }
+    fetchProgress()
+    const iv = setInterval(fetchProgress, 5000)
+    return () => clearInterval(iv)
+  }, [analysisProcessing])
 
   const handleAnalysisBatch = async () => {
     if (!analysisDirHandle || analysisFiles.length === 0) return
     setAnalysisError(null)
     setAnalysisProcessing(true)
     setAnalysisDone(false)
+    setAnalysisProgress({ current: 0, total: 0, filename: '', stage: '' })
     const controller = new AbortController()
     analysisAbortRef.current = controller
     try {
@@ -419,6 +464,12 @@ export default function AnalysisTab({ backendStatus }) {
       fd.append('n_decay', nDecay)
       fd.append('spike_n_decay', spikeNDecay)
       fd.append('decay_fit_start_us', decayFitStartUs)
+      if (analysisPreview?.decay_popt?.length) {
+        fd.append('decay_initial_params', JSON.stringify(analysisPreview.decay_popt))
+      }
+      if (analysisPreview?.spike_popt?.length) {
+        fd.append('spike_initial_params', JSON.stringify(analysisPreview.spike_popt))
+      }
       const res = await fetch(apiUrl('/api/trel-analysis-batch'), { method: 'POST', body: fd, signal: controller.signal })
       const ct = res.headers.get('content-type') || ''
       if (ct.includes('json')) {
@@ -529,7 +580,57 @@ export default function AnalysisTab({ backendStatus }) {
               />
               <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>기본값 4</span>
             </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => refreshPreview()}
+                style={{ padding: '6px 12px', marginTop: '22px' }}
+              >
+                미리보기 새로고침
+              </button>
+            </div>
           </div>
+
+          <details open style={{ marginTop: '12px', marginBottom: '12px' }}>
+            <summary style={{ cursor: 'pointer', fontSize: '0.9em', color: '#555', fontWeight: 500 }}>피팅 초기값 (피팅이 잘 안될 때 직접 입력)</summary>
+            <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '500px' }}>
+              {analysisPreview?.decay_popt && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDecayInitialParamsInput(JSON.stringify(analysisPreview.decay_popt))
+                    if (analysisPreview.spike_popt) setSpikeInitialParamsInput(JSON.stringify(analysisPreview.spike_popt))
+                  }}
+                  style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: '0.85em' }}
+                >
+                  현재 미리보기 결과로 채우기
+                </button>
+              )}
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>Decay 초기값 JSON (예: [1, 2, 0.5, 4, 0.01])</label>
+                <input
+                  type="text"
+                  value={decayInitialParamsInput}
+                  onChange={e => setDecayInitialParamsInput(e.target.value)}
+                  placeholder="비우면 자동 추정"
+                  style={{ width: '100%', padding: '6px 8px', fontFamily: 'monospace', fontSize: '0.9em' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>Spike 초기값 JSON (예: [1, 2, 0.5, 4, 0.01])</label>
+                <input
+                  type="text"
+                  value={spikeInitialParamsInput}
+                  onChange={e => setSpikeInitialParamsInput(e.target.value)}
+                  placeholder="비우면 자동 추정"
+                  style={{ width: '100%', padding: '6px 8px', fontFamily: 'monospace', fontSize: '0.9em' }}
+                />
+              </div>
+              <p style={{ fontSize: '0.8em', color: '#666' }}>
+                n=1: [A₁, τ₁, y0], n=2: [A₁, τ₁, A₂, τ₂, y0] 형식. 입력 후 미리보기 새로고침을 누르세요.
+              </p>
+            </div>
+          </details>
           {riseMode === 'tangent' && (
             <p style={{ marginTop: '-8px', marginBottom: '16px', fontSize: '0.85em', color: '#666' }}>
               Tangent 모드는 raw 데이터에 대해 약 17포인트 sliding window 선형 회귀로 최대 기울기 접선을 찾습니다. Low%/High% 값은 이 모드에서 사용되지 않습니다.
@@ -665,6 +766,14 @@ export default function AnalysisTab({ backendStatus }) {
               </button>
             )}
           </div>
+
+          {analysisProcessing && (
+            <p style={{ marginTop: '12px', fontSize: '0.9em', color: '#555' }}>
+              {analysisProgress?.total > 0
+                ? `${analysisProgress.current}/${analysisProgress.total}${analysisProgress.stage ? ` (${analysisProgress.stage})` : ''}${analysisProgress.filename ? ` · ${analysisProgress.filename}` : ''}`
+                : '분석 준비 중...'}
+            </p>
+          )}
 
           {analysisDone && <p style={{ marginTop: '12px', color: '#2e7d32', fontWeight: 600 }}>✓ TrEL_Analysis.xlsx 저장 완료</p>}
         </div>

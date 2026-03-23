@@ -22,6 +22,7 @@ from utils.trel_analysis import (
     analyze_single_file,
     format_rise_analysis_mode,
     get_preview_data as get_trel_preview,
+    parse_after_duty_from_filename,
     parse_vil_processed_for_voltage,
     parse_vil_processed_for_voltage_luminance,
 )
@@ -32,6 +33,7 @@ CORS(app)
 TREL_CACHE_TTL_SECONDS = 60 * 30
 PROCESSED_TREL_CACHE = {}
 PROCESSED_VIL_CACHE = {}
+TREL_BATCH_PROGRESS = {'active': False, 'current': 0, 'total': 0, 'filename': '', 'stage': ''}
 
 
 def prune_cache(cache_store):
@@ -466,6 +468,24 @@ def trel_analysis_preview():
         spike_n_decay = int(request.form.get('spike_n_decay', 2))
         rise_mode = request.form.get('rise_mode', 'tangent')
         decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
+        decay_init_json = request.form.get('decay_initial_params')
+        spike_init_json = request.form.get('spike_initial_params')
+        decay_initial_params = None
+        spike_initial_params = None
+        if decay_init_json:
+            try:
+                parsed = json.loads(decay_init_json)
+                if isinstance(parsed, list) and len(parsed) >= 3:  # n=1: [A1,tau1,y0], n=2: 5, n=3: 7
+                    decay_initial_params = [float(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        if spike_init_json:
+            try:
+                parsed = json.loads(spike_init_json)
+                if isinstance(parsed, list) and len(parsed) >= 3:
+                    spike_initial_params = [float(x) for x in parsed]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         content = f.read().decode('utf-8', errors='replace')
         preview = get_trel_preview(
             content,
@@ -475,6 +495,8 @@ def trel_analysis_preview():
             spike_n_decay=spike_n_decay,
             rise_mode=rise_mode,
             decay_fit_start_us=decay_fit_start_us,
+            decay_initial_params=decay_initial_params,
+            spike_initial_params=spike_initial_params,
         )
         if preview.get('error'):
             return jsonify({'success': False, 'error': preview['error']}), 400
@@ -482,6 +504,12 @@ def trel_analysis_preview():
     except Exception as e:
         print(f"[trel_analysis_preview] Error: {e}", flush=True)
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/trel-analysis-progress', methods=['GET'])
+def trel_analysis_progress():
+    """TrEL 배치 분석 진행 상황 조회"""
+    return jsonify(TREL_BATCH_PROGRESS)
+
 
 @app.route('/api/trel-analysis-batch', methods=['POST'])
 def trel_analysis_batch():
@@ -509,6 +537,32 @@ def trel_analysis_batch():
         if not files:
             return jsonify({'success': False, 'error': 'CSV 파일이 없습니다.'}), 400
 
+        TREL_BATCH_PROGRESS['active'] = True
+        TREL_BATCH_PROGRESS['total'] = len(files)
+        TREL_BATCH_PROGRESS['current'] = 0
+        TREL_BATCH_PROGRESS['filename'] = ''
+        TREL_BATCH_PROGRESS['stage'] = '파일 로드'
+
+        # 미리보기 피팅 값을 초기값으로 일괄 적용 (전달되면 모든 파일에 사용)
+        decay_init_json = request.form.get('decay_initial_params')
+        spike_init_json = request.form.get('spike_initial_params')
+        preview_decay_popt = None
+        preview_spike_popt = None
+        if decay_init_json:
+            try:
+                preview_decay_popt = json.loads(decay_init_json)
+                if not isinstance(preview_decay_popt, list) or len(preview_decay_popt) < 3:
+                    preview_decay_popt = None
+            except (json.JSONDecodeError, TypeError):
+                preview_decay_popt = None
+        if spike_init_json:
+            try:
+                preview_spike_popt = json.loads(spike_init_json)
+                if not isinstance(preview_spike_popt, list) or len(preview_spike_popt) < 3:
+                    preview_spike_popt = None
+            except (json.JSONDecodeError, TypeError):
+                preview_spike_popt = None
+
         vil_time_voltage_lum = []
         for vf in vil_files:
             data = parse_vil_uploaded_for_voltage_luminance(vf)
@@ -521,29 +575,84 @@ def trel_analysis_batch():
                     seen[t] = (v, lum)
             vil_time_voltage_lum = [(t, seen[t][0], seen[t][1]) for t in sorted(seen.keys())]
 
-        results = []
-        preview_seed_popt = None
-        preview_seed_spike_popt = None
-        for idx, f in enumerate(files):
+        # 시간 순 정렬 (time_min 또는 after_duty)
+        def _file_sort_key(file_obj):
+            tm = parse_minutes_from_filename(file_obj.filename)
+            ad = parse_after_duty_from_filename(file_obj.filename) or ''
+            return (tm is None, tm if tm is not None else float('inf'), ad)
+
+        files_sorted = sorted(files, key=_file_sort_key)
+        # 재읽기 위해 content 저장 (file stream은 1회만 읽기 가능)
+        items = []
+        for f in files_sorted:
             content = f.read().decode('utf-8', errors='replace')
-            r = analyze_single_file(
-                content, f.filename, low_pct, high_pct, n_decay,
+            items.append({'content': content, 'filename': f.filename})
+
+        # 10분에 가장 가까운 파일 인덱스 (미리보기 기준)
+        def _time_for_seed(idx):
+            tm = parse_minutes_from_filename(items[idx]['filename'])
+            return tm if tm is not None else 10.0
+        idx_preview = 0
+        if len(items) > 1:
+            best_diff = abs(_time_for_seed(0) - 10.0)
+            for i in range(1, len(items)):
+                d = abs(_time_for_seed(i) - 10.0)
+                if d < best_diff:
+                    best_diff = d
+                    idx_preview = i
+
+        results = [None] * len(items)
+        total = len(items)
+
+        def _fit(idx, decay_init, spike_init):
+            it = items[idx]
+            return analyze_single_file(
+                it['content'], it['filename'], low_pct, high_pct, n_decay,
                 spike_n_decay=spike_n_decay,
                 rise_mode=rise_mode,
                 vil_time_voltage=vil_time_voltage_lum if vil_time_voltage_lum else None,
                 decay_fit_start_us=decay_fit_start_us,
-                decay_initial_params=preview_seed_popt if idx > 0 else None,
-                spike_initial_params=preview_seed_spike_popt if idx > 0 else None,
+                decay_initial_params=decay_init,
+                spike_initial_params=spike_init,
             )
-            results.append(r)
-            # First file (preview source) fit result is reused
-            # as initial guess for remaining files.
-            if preview_seed_popt is None and isinstance(r.get('popt'), list):
-                preview_seed_popt = r.get('popt')
-            if preview_seed_spike_popt is None and isinstance(r.get('spike_popt'), list):
-                preview_seed_spike_popt = r.get('spike_popt')
 
-        has_voltage = any(row.get('voltage') is not None for row in results)
+        def _set_progress(cur, fn, stage):
+            TREL_BATCH_PROGRESS['current'] = cur
+            TREL_BATCH_PROGRESS['total'] = total
+            TREL_BATCH_PROGRESS['filename'] = fn
+            TREL_BATCH_PROGRESS['stage'] = stage
+
+        _set_progress(0, '', '준비')
+        # 1) 순방향: 미리보기(10분) → 15 → 20 (미리보기값 → 직전 수렴값)
+        decay_seed = preview_decay_popt
+        spike_seed = preview_spike_popt
+        R2_MIN_ACCEPT = 0.85  # R² 이하일 때 초기값으로 채택 안 함
+        for i, idx in enumerate(range(idx_preview, len(items))):
+            _set_progress(idx - idx_preview + 1, items[idx]['filename'], '순방향')
+            r = _fit(idx, decay_seed, spike_seed)
+            results[idx] = r
+            decay_r2 = r.get('decay_r2')
+            spike_r2 = r.get('spike_r2')
+            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_ACCEPT):
+                decay_seed = r.get('popt')
+            if isinstance(r.get('spike_popt'), list) and (spike_r2 is None or spike_r2 >= R2_MIN_ACCEPT):
+                spike_seed = r.get('spike_popt')
+
+        # 2) 역방향: 5 → 0 (미리보기값 → 직전 수렴값)
+        decay_seed = preview_decay_popt
+        spike_seed = preview_spike_popt
+        for i, idx in enumerate(range(idx_preview - 1, -1, -1)):
+            _set_progress(len(items) - idx, items[idx]['filename'], '역방향')
+            r = _fit(idx, decay_seed, spike_seed)
+            results[idx] = r
+            decay_r2 = r.get('decay_r2')
+            spike_r2 = r.get('spike_r2')
+            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_ACCEPT):
+                decay_seed = r.get('popt')
+            if isinstance(r.get('spike_popt'), list) and (spike_r2 is None or spike_r2 >= R2_MIN_ACCEPT):
+                spike_seed = r.get('spike_popt')
+
+        has_voltage = any(row.get('voltage') is not None for row in results if row)
         if has_voltage:
             results.sort(key=lambda r: (r.get('time_min') is None, r.get('time_min') or float('inf')))
         else:
@@ -576,6 +685,8 @@ def trel_analysis_batch():
             row['Spike tau_avg (μs)'] = r.get('spike_tau_avg')
             row['Spike Integral (nC/cm²)'] = r.get('spike_integral')
             row['Rise Slope (a.u./μs)'] = r.get('rise_slope')
+            row['Decay R²'] = r.get('decay_r2')
+            row['Spike R²'] = r.get('spike_r2')
             excel_rows.append(row)
             
         df = pd.DataFrame(excel_rows)
@@ -591,7 +702,7 @@ def trel_analysis_batch():
         cols.append('tau_avg (μs)')
         for i in range(1, spike_n_decay + 1):
             cols.extend([f'Spike A_{i} (mA cm⁻²)', f'Spike tau_{i} (μs)'])
-        cols.extend(['Spike tau_avg (μs)', 'Spike Integral (nC/cm²)', 'Rise Slope (a.u./μs)'])
+        cols.extend(['Spike tau_avg (μs)', 'Spike Integral (nC/cm²)', 'Rise Slope (a.u./μs)', 'Decay R²', 'Spike R²'])
         
         # 존재하는 컬럼만 선택
         cols = [c for c in cols if c in df.columns]
@@ -624,6 +735,8 @@ def trel_analysis_batch():
     except Exception as e:
         print(f"[trel_analysis_batch] Error: {e}", flush=True)
         return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        TREL_BATCH_PROGRESS['active'] = False
 
 if __name__ == '__main__':
     port_str = os.environ.get('PORT')

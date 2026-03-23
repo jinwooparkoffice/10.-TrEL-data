@@ -410,6 +410,22 @@ def _sort_decay_params(params: np.ndarray) -> np.ndarray:
     return np.array(sorted_params, dtype=float)
 
 
+def _compute_r_squared(y_data: np.ndarray, y_pred: np.ndarray) -> float:
+    """R² (coefficient of determination) 계산. 1에 가까울수록 피팅 양호."""
+    y_d = np.asarray(y_data, dtype=float)
+    y_p = np.asarray(y_pred, dtype=float)
+    valid = np.isfinite(y_d) & np.isfinite(y_p)
+    if np.sum(valid) < 2:
+        return float('nan')
+    y_d = y_d[valid]
+    y_p = y_p[valid]
+    ss_res = np.sum((y_d - y_p) ** 2)
+    ss_tot = np.sum((y_d - np.mean(y_d)) ** 2)
+    if ss_tot < 1e-20:
+        return float('nan')
+    return float(1.0 - ss_res / ss_tot)
+
+
 def _calculate_tau_avg(params: np.ndarray) -> float:
     """가중 평균 tau 계산."""
     amplitudes = params[0:-1:2]
@@ -425,7 +441,7 @@ def fit_decay(
     n_params: int = 2,
     decay_fit_start_us: float = 0.0,
     initial_params: Optional[List[float]] = None,
-) -> Tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray]]:
+) -> Tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray], Optional[float]]:
     """
     Decay Fitting
     - 대상: time_shifted >= decay_fit_start_us
@@ -439,7 +455,7 @@ def fit_decay(
     x_fit = t_fit - fit_start
     
     if len(t_fit) < n_params * 2 + 2:
-        return None, None, None
+        return None, None, None, None
 
     # Initial Guesses
     max_y = np.max(y_fit) if len(y_fit) > 0 else 1.0
@@ -496,7 +512,8 @@ def fit_decay(
         popt = _sort_decay_params(result.x)
         tau_avg = _calculate_tau_avg(popt)
         y_pred = multi_exponential_shifted(x_fit, *popt)
-        return popt, tau_avg, y_pred
+        r2 = _compute_r_squared(y_fit, y_pred)
+        return popt, tau_avg, y_pred, r2
     except Exception:
         # Warm-start failed: retry once with generic initialization.
         if p0 is not p0_default:
@@ -513,10 +530,89 @@ def fit_decay(
                 popt = _sort_decay_params(result.x)
                 tau_avg = _calculate_tau_avg(popt)
                 y_pred = multi_exponential_shifted(x_fit, *popt)
-                return popt, tau_avg, y_pred
+                r2 = _compute_r_squared(y_fit, y_pred)
+                return popt, tau_avg, y_pred, r2
             except Exception:
-                return None, None, None
-        return None, None, None
+                return None, None, None, None
+        return None, None, None, None
+
+
+def _fit_decay_for_spike(
+    time_shifted: np.ndarray,
+    y_data: np.ndarray,
+    n_params: int = 2,
+    decay_fit_start_us: float = 0.0,
+    initial_params: Optional[List[float]] = None,
+) -> Tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray], Optional[float]]:
+    """
+    Negative spike 전용 decay 피팅.
+    - EL decay(fit_decay)와 분리: 1/y weighting (sigma = sqrt(y))
+    - fit_decay는 sigma = y 로 1/y^2 유사 효과, 여기는 1/y (Statistical Weighting)
+    """
+    fit_start = max(float(decay_fit_start_us), 0.0)
+    mask = time_shifted >= fit_start
+    t_fit = time_shifted[mask]
+    y_fit = y_data[mask]
+    x_fit = t_fit - fit_start
+
+    if len(t_fit) < n_params * 2 + 2:
+        return None, None, None, None
+
+    max_y = np.max(y_fit) if len(y_fit) > 0 else 1.0
+    min_y = np.min(y_fit) if len(y_fit) > 0 else 0.0
+    tail_count = max(5, min(len(y_fit), int(np.ceil(len(y_fit) * 0.1))))
+    y0_guess = float(np.mean(y_fit[-tail_count:])) if tail_count > 0 else min_y
+
+    p0_default = []
+    for i in range(n_params):
+        p0_default.extend([max(max_y - y0_guess, 1e-10) / n_params, 1.0 * (i + 1)])
+    p0_default.append(y0_guess)
+
+    TAU_CHANGE_LIMIT = 0.2  # tau ±20% 허용
+    lower = [0.0, 1e-10] * n_params + [0.0]
+    upper = [np.inf, np.inf] * n_params + [np.inf]
+    p0 = p0_default
+    if initial_params is not None and len(initial_params) == len(p0_default):
+        try:
+            p0_arr = np.array(initial_params, dtype=float)
+            if np.all(np.isfinite(p0_arr)):
+                for i in range(n_params):
+                    p0_arr[2 * i] = max(p0_arr[2 * i], 0.0)
+                    p0_arr[2 * i + 1] = max(p0_arr[2 * i + 1], 1e-10)
+                p0_arr[-1] = max(p0_arr[-1], 0.0)
+                p0 = p0_arr.tolist()
+                # tau ±20% bounds (seed 있을 때)
+                for i in range(n_params):
+                    prev_tau = p0_arr[2 * i + 1]
+                    lower[2 * i + 1] = max(1e-10, prev_tau * (1.0 - TAU_CHANGE_LIMIT))
+                    upper[2 * i + 1] = prev_tau * (1.0 + TAU_CHANGE_LIMIT)
+        except Exception:
+            p0 = p0_default
+
+    # 1/y weighting: sigma = sqrt(y) -> residual^2 가중치 = 1/y (fit_decay는 sigma=y로 1/y^2)
+    y_floor = max(float(np.min(y_fit[y_fit > 0])) if np.any(y_fit > 0) else 1e-10, 0.01)
+    sigma = np.sqrt(np.maximum(y_fit, y_floor))
+
+    def residuals_1overy(params):
+        y_model = multi_exponential_shifted(x_fit, *params)
+        return (y_model - y_fit) / sigma
+
+    try:
+        result = least_squares(
+            residuals_1overy,
+            x0=np.array(p0, dtype=float),
+            bounds=(np.array(lower, dtype=float), np.array(upper, dtype=float)),
+            max_nfev=10000,
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        popt = _sort_decay_params(result.x)
+        tau_avg = _calculate_tau_avg(popt)
+        y_pred = multi_exponential_shifted(x_fit, *popt)
+        r2 = _compute_r_squared(y_fit, y_pred)
+        return popt, tau_avg, y_pred, r2
+    except Exception:
+        return None, None, None, None
 
 
 def fit_negative_spike(
@@ -529,7 +625,7 @@ def fit_negative_spike(
     Negative spike fitting
     - 대상: shifted_time >= 0 이후 raw current density
     - 절대값을 취해 양수 decay 신호로 변환
-    - EL decay와 동일한 log-weighted fitting 로직 사용
+    - 1/y weighting (sigma = sqrt(y)) 사용 (EL decay fit_decay는 1/y^2)
     """
     mask = time_shifted >= 0
     if not np.any(mask):
@@ -571,7 +667,7 @@ def fit_negative_spike(
         result['t_spike_fit'] = t_spike_fit
         return result
 
-    popt, tau_avg, y_pred = fit_decay(
+    popt, tau_avg, y_pred, spike_r2 = _fit_decay_for_spike(
         t_spike_fit,
         spike_signal_fit,
         n_params=n_params,
@@ -591,6 +687,7 @@ def fit_negative_spike(
         'tau_avg': float(tau_avg),
         'integral': integral,
         'fit_start_us': fit_start_us,
+        'spike_r2': float(spike_r2) if spike_r2 is not None and np.isfinite(spike_r2) else None,
     })
     for i in range(n_params):
         result[f'a_{i + 1}'] = float(popt[2 * i])
@@ -661,7 +758,7 @@ def analyze_single_file(
     )
     
     # 2. Decay Analysis (Using time_shifted)
-    popt, tau_avg, _ = fit_decay(
+    popt, tau_avg, _, decay_r2 = fit_decay(
         time_shifted,
         el_signal,
         n_decay,
@@ -721,6 +818,7 @@ def analyze_single_file(
                 result[f'f_{i + 1}'] = None
         result['tau_avg'] = tau_avg
         result['popt'] = popt.tolist()
+        result['decay_r2'] = float(decay_r2) if decay_r2 is not None and np.isfinite(decay_r2) else None
 
     if not spike_res.get('error'):
         for i in range(spike_n_decay):
@@ -731,6 +829,7 @@ def analyze_single_file(
         result['spike_integral'] = spike_res.get('integral')
         result['spike_popt'] = spike_res.get('popt')
         result['spike_peak_time_us'] = spike_res.get('peak_time_us')
+        result['spike_r2'] = spike_res.get('spike_r2')
     else:
         result['spike_error'] = spike_res.get('error')
 
@@ -745,9 +844,12 @@ def get_preview_data(
     spike_n_decay: int = DEFAULT_NEGATIVE_SPIKE_N_PARAMS,
     rise_mode: str = DEFAULT_RISE_ANALYSIS_MODE,
     decay_fit_start_us: float = 0.0,
+    decay_initial_params: Optional[List[float]] = None,
+    spike_initial_params: Optional[List[float]] = None,
 ) -> Dict:
     """
     미리보기용 데이터 생성
+    - decay_initial_params, spike_initial_params: 필요시 수동 지정 (None이면 기존 heuristics 사용)
     """
     time_raw, time_shifted, el_signal, current_density, _ = parse_trel_csv(content)
     if len(time_raw) < 10:
@@ -764,8 +866,14 @@ def get_preview_data(
         tangent_window_points=DEFAULT_TANGENT_WINDOW_POINTS,
     )
     fit_start = max(float(decay_fit_start_us), 0.0)
-    popt, tau_avg, y_fit = fit_decay(time_shifted, el_signal, n_decay, fit_start)
-    spike_res = fit_negative_spike(time_shifted, current_density, n_params=spike_n_decay)
+    popt, tau_avg, y_fit, _ = fit_decay(
+        time_shifted, el_signal, n_decay, fit_start,
+        initial_params=decay_initial_params,
+    )
+    spike_res = fit_negative_spike(
+        time_shifted, current_density, n_params=spike_n_decay,
+        initial_params=spike_initial_params,
+    )
 
     # Preview Data Construction
     # 1. Rise Preview
@@ -884,10 +992,16 @@ def get_preview_data(
                     float(spike_res['popt'][2 * i + 1]) for i in range((len(spike_res['popt']) - 1) // 2)
                 ]
         
-    return {
+    out = {
         'rise': rise_data,
         'decay': decay_data,
         'negative_spike': spike_data,
         'tau_avg': float(tau_avg) if tau_avg is not None else None,
         'tau_list': [float(popt[2 * i + 1]) for i in range((len(popt) - 1) // 2)] if popt is not None else [],
     }
+    if popt is not None:
+        out['decay_popt'] = [float(x) for x in popt]
+    spopt = spike_res.get('popt')
+    if spopt is not None:
+        out['spike_popt'] = [float(x) for x in spopt]
+    return out
