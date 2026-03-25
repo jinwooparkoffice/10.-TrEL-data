@@ -465,25 +465,15 @@ def trel_analysis_preview():
         low_pct = float(request.form.get('low_pct', 0.1))
         high_pct = float(request.form.get('high_pct', 99))
         n_decay = int(request.form.get('n_decay', 2))
-        spike_n_decay = int(request.form.get('spike_n_decay', 2))
         rise_mode = request.form.get('rise_mode', 'tangent')
         decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
         decay_init_json = request.form.get('decay_initial_params')
-        spike_init_json = request.form.get('spike_initial_params')
         decay_initial_params = None
-        spike_initial_params = None
         if decay_init_json:
             try:
                 parsed = json.loads(decay_init_json)
-                if isinstance(parsed, list) and len(parsed) >= 3:  # n=1: [A1,tau1,y0], n=2: 5, n=3: 7
-                    decay_initial_params = [float(x) for x in parsed]
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        if spike_init_json:
-            try:
-                parsed = json.loads(spike_init_json)
                 if isinstance(parsed, list) and len(parsed) >= 3:
-                    spike_initial_params = [float(x) for x in parsed]
+                    decay_initial_params = [float(x) for x in parsed]
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
         content = f.read().decode('utf-8', errors='replace')
@@ -492,11 +482,9 @@ def trel_analysis_preview():
             low_pct,
             high_pct,
             n_decay,
-            spike_n_decay=spike_n_decay,
             rise_mode=rise_mode,
             decay_fit_start_us=decay_fit_start_us,
             decay_initial_params=decay_initial_params,
-            spike_initial_params=spike_initial_params,
         )
         if preview.get('error'):
             return jsonify({'success': False, 'error': preview['error']}), 400
@@ -530,7 +518,6 @@ def trel_analysis_batch():
         low_pct = float(request.form.get('low_pct', 0.1))
         high_pct = float(request.form.get('high_pct', 99))
         n_decay = int(request.form.get('n_decay', 2))
-        spike_n_decay = int(request.form.get('spike_n_decay', 2))
         rise_mode = request.form.get('rise_mode', 'tangent')
         decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
 
@@ -543,11 +530,8 @@ def trel_analysis_batch():
         TREL_BATCH_PROGRESS['filename'] = ''
         TREL_BATCH_PROGRESS['stage'] = '파일 로드'
 
-        # 미리보기 피팅 값을 초기값으로 일괄 적용 (전달되면 모든 파일에 사용)
         decay_init_json = request.form.get('decay_initial_params')
-        spike_init_json = request.form.get('spike_initial_params')
         preview_decay_popt = None
-        preview_spike_popt = None
         if decay_init_json:
             try:
                 preview_decay_popt = json.loads(decay_init_json)
@@ -555,13 +539,6 @@ def trel_analysis_batch():
                     preview_decay_popt = None
             except (json.JSONDecodeError, TypeError):
                 preview_decay_popt = None
-        if spike_init_json:
-            try:
-                preview_spike_popt = json.loads(spike_init_json)
-                if not isinstance(preview_spike_popt, list) or len(preview_spike_popt) < 3:
-                    preview_spike_popt = None
-            except (json.JSONDecodeError, TypeError):
-                preview_spike_popt = None
 
         vil_time_voltage_lum = []
         for vf in vil_files:
@@ -604,16 +581,14 @@ def trel_analysis_batch():
         results = [None] * len(items)
         total = len(items)
 
-        def _fit(idx, decay_init, spike_init):
+        def _fit(idx, decay_init):
             it = items[idx]
             return analyze_single_file(
                 it['content'], it['filename'], low_pct, high_pct, n_decay,
-                spike_n_decay=spike_n_decay,
                 rise_mode=rise_mode,
                 vil_time_voltage=vil_time_voltage_lum if vil_time_voltage_lum else None,
                 decay_fit_start_us=decay_fit_start_us,
                 decay_initial_params=decay_init,
-                spike_initial_params=spike_init,
             )
 
         def _set_progress(cur, fn, stage):
@@ -623,34 +598,24 @@ def trel_analysis_batch():
             TREL_BATCH_PROGRESS['stage'] = stage
 
         _set_progress(0, '', '준비')
-        # 1) 순방향: 미리보기(10분) → 15 → 20 (미리보기값 → 직전 수렴값)
         decay_seed = preview_decay_popt
-        spike_seed = preview_spike_popt
-        R2_MIN_ACCEPT = 0.85  # R² 이하일 때 초기값으로 채택 안 함
+        R2_MIN_DECAY = 0.85
         for i, idx in enumerate(range(idx_preview, len(items))):
             _set_progress(idx - idx_preview + 1, items[idx]['filename'], '순방향')
-            r = _fit(idx, decay_seed, spike_seed)
+            r = _fit(idx, decay_seed)
             results[idx] = r
             decay_r2 = r.get('decay_r2')
-            spike_r2 = r.get('spike_r2')
-            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_ACCEPT):
+            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_DECAY):
                 decay_seed = r.get('popt')
-            if isinstance(r.get('spike_popt'), list) and (spike_r2 is None or spike_r2 >= R2_MIN_ACCEPT):
-                spike_seed = r.get('spike_popt')
 
-        # 2) 역방향: 5 → 0 (미리보기값 → 직전 수렴값)
         decay_seed = preview_decay_popt
-        spike_seed = preview_spike_popt
         for i, idx in enumerate(range(idx_preview - 1, -1, -1)):
             _set_progress(len(items) - idx, items[idx]['filename'], '역방향')
-            r = _fit(idx, decay_seed, spike_seed)
+            r = _fit(idx, decay_seed)
             results[idx] = r
             decay_r2 = r.get('decay_r2')
-            spike_r2 = r.get('spike_r2')
-            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_ACCEPT):
+            if isinstance(r.get('popt'), list) and (decay_r2 is None or decay_r2 >= R2_MIN_DECAY):
                 decay_seed = r.get('popt')
-            if isinstance(r.get('spike_popt'), list) and (spike_r2 is None or spike_r2 >= R2_MIN_ACCEPT):
-                spike_seed = r.get('spike_popt')
 
         has_voltage = any(row.get('voltage') is not None for row in results if row)
         if has_voltage:
@@ -658,11 +623,24 @@ def trel_analysis_batch():
         else:
             results.sort(key=lambda r: (r.get('after_duty') is None or r.get('after_duty') == '', r.get('after_duty') or ''))
 
-        # Excel 생성 (Pandas)
+        # Excel 생성 (Pandas) - 분석 실패/빈 결과 행 제외
         excel_rows = []
         first_col_name = 'Time (min)' if has_voltage else 'duty 뒤'
-        
+
+        def _has_meaningful_data(r):
+            if not r:
+                return False
+            if r.get('error'):
+                return False
+            return (
+                r.get('t_delay') is not None
+                or r.get('tau_1') is not None
+                or r.get('spike_integral') is not None
+            )
+
         for r in results:
+            if not _has_meaningful_data(r):
+                continue
             row = {}
             row[first_col_name] = r.get('time_min') if has_voltage else r.get('after_duty')
             
@@ -679,14 +657,10 @@ def trel_analysis_batch():
                 row[f'f_{i}'] = r.get(f'f_{i}')
                 
             row['tau_avg (μs)'] = r.get('tau_avg')
-            for i in range(1, spike_n_decay + 1):
-                row[f'Spike A_{i} (mA cm⁻²)'] = r.get(f'spike_a_{i}')
-                row[f'Spike tau_{i} (μs)'] = r.get(f'spike_tau_{i}')
-            row['Spike tau_avg (μs)'] = r.get('spike_tau_avg')
             row['Spike Integral (nC/cm²)'] = r.get('spike_integral')
+            row['Spike Decay Time (μs)'] = r.get('spike_decay_time_us')
             row['Rise Slope (a.u./μs)'] = r.get('rise_slope')
             row['Decay R²'] = r.get('decay_r2')
-            row['Spike R²'] = r.get('spike_r2')
             excel_rows.append(row)
             
         df = pd.DataFrame(excel_rows)
@@ -699,10 +673,7 @@ def trel_analysis_batch():
         cols.extend(['t_delay (μs)', 't_rise (μs)', 't_saturation (μs)'])
         for i in range(1, n_decay + 1):
             cols.extend([f'tau_{i} (μs)', f'f_{i}'])
-        cols.append('tau_avg (μs)')
-        for i in range(1, spike_n_decay + 1):
-            cols.extend([f'Spike A_{i} (mA cm⁻²)', f'Spike tau_{i} (μs)'])
-        cols.extend(['Spike tau_avg (μs)', 'Spike Integral (nC/cm²)', 'Rise Slope (a.u./μs)', 'Decay R²', 'Spike R²'])
+        cols.extend(['tau_avg (μs)', 'Spike Integral (nC/cm²)', 'Spike Decay Time (μs)', 'Rise Slope (a.u./μs)', 'Decay R²'])
         
         # 존재하는 컬럼만 선택
         cols = [c for c in cols if c in df.columns]

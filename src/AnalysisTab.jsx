@@ -287,11 +287,9 @@ export default function AnalysisTab({ backendStatus }) {
   const [lowPct, setLowPct] = useState(0.1)
   const [highPct, setHighPct] = useState(99)
   const [nDecay, setNDecay] = useState(2)
-  const [spikeNDecay, setSpikeNDecay] = useState(2)
   const [decayFitStartUs, setDecayFitStartUs] = useState(0)
   const [decayInitialParamsInput, setDecayInitialParamsInput] = useState('')
-  const [spikeInitialParamsInput, setSpikeInitialParamsInput] = useState('')
-  const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay' | 'spike'
+  const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay'
   const [analysisPreview, setAnalysisPreview] = useState(null)
   const [analysisError, setAnalysisError] = useState(null)
   const [analysisProcessing, setAnalysisProcessing] = useState(false)
@@ -325,17 +323,15 @@ export default function AnalysisTab({ backendStatus }) {
   }
 
   const loadAnalysisPreview = async (fileHandle, opts = {}) => {
-    const { decayParams, spikeParams } = opts
+    const { decayParams } = opts
     const fd = new FormData()
     fd.append('file', await fileHandle.getFile())
     fd.append('rise_mode', riseMode)
     fd.append('low_pct', lowPct)
     fd.append('high_pct', highPct)
     fd.append('n_decay', nDecay)
-    fd.append('spike_n_decay', spikeNDecay)
     fd.append('decay_fit_start_us', decayFitStartUs)
     if (decayParams?.length) fd.append('decay_initial_params', JSON.stringify(decayParams))
-    if (spikeParams?.length) fd.append('spike_initial_params', JSON.stringify(spikeParams))
 
     const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
     const data = await res.json()
@@ -408,8 +404,7 @@ export default function AnalysisTab({ backendStatus }) {
     if (!analysisFiles?.length) return
     const idx = indexClosestTo10Min(analysisFiles)
     const decayParams = opts.decayParams ?? parseInitialParams(decayInitialParamsInput)
-    const spikeParams = opts.spikeParams ?? parseInitialParams(spikeInitialParamsInput)
-    loadAnalysisPreview(analysisFiles[idx].handle, { decayParams, spikeParams }).catch(err => {
+    loadAnalysisPreview(analysisFiles[idx].handle, { decayParams }).catch(err => {
       setAnalysisPreview(null)
       setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
     })
@@ -419,7 +414,7 @@ export default function AnalysisTab({ backendStatus }) {
     if (analysisFolderReady && analysisFiles.length > 0) {
       refreshPreview()
     }
-  }, [riseMode, lowPct, highPct, nDecay, spikeNDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
+  }, [riseMode, lowPct, highPct, nDecay, decayFitStartUs, analysisFolderReady, analysisFiles])
 
   useEffect(() => {
     if (!analysisProcessing) return
@@ -462,13 +457,9 @@ export default function AnalysisTab({ backendStatus }) {
       fd.append('low_pct', lowPct)
       fd.append('high_pct', highPct)
       fd.append('n_decay', nDecay)
-      fd.append('spike_n_decay', spikeNDecay)
       fd.append('decay_fit_start_us', decayFitStartUs)
       if (analysisPreview?.decay_popt?.length) {
         fd.append('decay_initial_params', JSON.stringify(analysisPreview.decay_popt))
-      }
-      if (analysisPreview?.spike_popt?.length) {
-        fd.append('spike_initial_params', JSON.stringify(analysisPreview.spike_popt))
       }
       const res = await fetch(apiUrl('/api/trel-analysis-batch'), { method: 'POST', body: fd, signal: controller.signal })
       const ct = res.headers.get('content-type') || ''
@@ -562,12 +553,6 @@ export default function AnalysisTab({ backendStatus }) {
               </select>
             </div>
             <div>
-              <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Negative Spike 지수 개수 (n)</label>
-              <select value={spikeNDecay} onChange={e => setSpikeNDecay(Number(e.target.value))} style={{ padding: '6px 8px' }}>
-                {[1, 2, 3].map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </div>
-            <div>
               <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>Decay 피팅 시작 (μs)</label>
               <input
                 type="number"
@@ -597,10 +582,7 @@ export default function AnalysisTab({ backendStatus }) {
               {analysisPreview?.decay_popt && (
                 <button
                   type="button"
-                  onClick={() => {
-                    setDecayInitialParamsInput(JSON.stringify(analysisPreview.decay_popt))
-                    if (analysisPreview.spike_popt) setSpikeInitialParamsInput(JSON.stringify(analysisPreview.spike_popt))
-                  }}
+                  onClick={() => setDecayInitialParamsInput(JSON.stringify(analysisPreview.decay_popt))}
                   style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: '0.85em' }}
                 >
                   현재 미리보기 결과로 채우기
@@ -616,18 +598,8 @@ export default function AnalysisTab({ backendStatus }) {
                   style={{ width: '100%', padding: '6px 8px', fontFamily: 'monospace', fontSize: '0.9em' }}
                 />
               </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>Spike 초기값 JSON (예: [1, 2, 0.5, 4, 0.01])</label>
-                <input
-                  type="text"
-                  value={spikeInitialParamsInput}
-                  onChange={e => setSpikeInitialParamsInput(e.target.value)}
-                  placeholder="비우면 자동 추정"
-                  style={{ width: '100%', padding: '6px 8px', fontFamily: 'monospace', fontSize: '0.9em' }}
-                />
-              </div>
               <p style={{ fontSize: '0.8em', color: '#666' }}>
-                n=1: [A₁, τ₁, y0], n=2: [A₁, τ₁, A₂, τ₂, y0] 형식. 입력 후 미리보기 새로고침을 누르세요.
+                Decay n=1: [A₁, τ₁, y0], n=2: [A₁, τ₁, A₂, τ₂, y0] 형식. 입력 후 미리보기 새로고침을 누르세요.
               </p>
             </div>
           </details>
@@ -676,20 +648,6 @@ export default function AnalysisTab({ backendStatus }) {
                 >
                   Decay (Log)
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setPreviewSubTab('spike')}
-                  style={{
-                    padding: '8px 16px',
-                    border: 'none',
-                    background: previewSubTab === 'spike' ? '#e3f2fd' : 'transparent',
-                    borderBottom: previewSubTab === 'spike' ? '2px solid #2196f3' : '2px solid transparent',
-                    cursor: 'pointer',
-                    fontSize: '0.9em',
-                  }}
-                >
-                  Negative Spike Fit
-                </button>
               </div>
               {previewSubTab === 'rise' && analysisPreview.rise && (
                 <RisePreviewChart
@@ -713,28 +671,10 @@ export default function AnalysisTab({ backendStatus }) {
                   xLabel="Time_Decay (μs)"
                 />
               )}
-              {previewSubTab === 'spike' && analysisPreview.negative_spike && (
-                <LogFitPreviewChart
-                  timeData={analysisPreview.negative_spike.time_spike}
-                  signalLog={analysisPreview.negative_spike.spike_signal_log}
-                  timeFit={analysisPreview.negative_spike.t_spike_fit}
-                  fitLog={analysisPreview.negative_spike.y_spike_fit_log}
-                  xLabel="Time_Negative Spike (μs)"
-                />
-              )}
               {analysisPreview.tau_avg != null && (
                 <p style={{ marginTop: '8px', fontSize: '0.9em', color: '#666' }}>
                   τ_avg = {Number.isFinite(analysisPreview.tau_avg) ? analysisPreview.tau_avg.toFixed(4) : '?'} μs
                   {analysisPreview.tau_list?.length > 0 && ` (${analysisPreview.tau_list.map((t, i) => `τ${i + 1}=${Number.isFinite(t) ? t.toFixed(4) : '?'}`).join(', ')})`}
-                </p>
-              )}
-              {previewSubTab === 'spike' && analysisPreview.negative_spike?.tau_avg != null && (
-                <p style={{ marginTop: '8px', fontSize: '0.9em', color: '#666' }}>
-                  Spike τ_avg = {Number.isFinite(analysisPreview.negative_spike.tau_avg) ? analysisPreview.negative_spike.tau_avg.toFixed(4) : '?'} μs
-                  {analysisPreview.negative_spike.tau_list?.length > 0 && ` (${analysisPreview.negative_spike.tau_list.map((t, i) => `τ${i + 1}=${Number.isFinite(t) ? t.toFixed(4) : '?'}`).join(', ')})`}
-                  {analysisPreview.negative_spike.peak_time_us != null && `, peak@raw = ${Number.isFinite(analysisPreview.negative_spike.peak_time_us) ? analysisPreview.negative_spike.peak_time_us.toFixed(4) : '?'} μs`}
-                  {analysisPreview.negative_spike.fit_start_us != null && `, fit start = ${Number.isFinite(analysisPreview.negative_spike.fit_start_us) ? analysisPreview.negative_spike.fit_start_us.toFixed(4) : '?'} μs`}
-                  {analysisPreview.negative_spike.integral != null && `, ∫Idt = ${Number.isFinite(analysisPreview.negative_spike.integral) ? analysisPreview.negative_spike.integral.toFixed(4) : '?'} nC/cm²`}
                 </p>
               )}
             </div>

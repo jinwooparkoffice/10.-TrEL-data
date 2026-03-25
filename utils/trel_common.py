@@ -7,12 +7,13 @@ import pandas as pd
 
 
 def parse_minutes_from_filename(filename: str) -> Optional[float]:
-    """파일명에서 측정 시간(분) 추출."""
+    """파일명에서 측정 시간(분) 추출. 2.5min, 2.75min 등 소수 분 지원."""
     base_name = re.sub(r'\.[^.]+$', '', filename)
+    # \d+(?:\.\d+)? = 정수 또는 소수 (2.5, 2.75 등)
     patterns = [
-        r'(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*min(?=$|[_\-\s])',
-        r'(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+)\s*m(?=$|[_\-\s])',
-        r'(?:^|[_\-\s])(\d+)\s*h(?=$|[_\-\s])',
+        r'(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+(?:\.\d+)?)\s*min(?=$|[_\-\s])',
+        r'(?:^|[_\-\s])(?:(\d+)\s*h)?\s*(\d+(?:\.\d+)?)\s*m(?=$|[_\-\s])',
+        r'(?:^|[_\-\s])(\d+(?:\.\d+)?)\s*h(?=$|[_\-\s])',
     ]
 
     for pattern in patterns:
@@ -24,11 +25,11 @@ def parse_minutes_from_filename(filename: str) -> Optional[float]:
         groups = match.groups()
         if len(groups) == 2:
             hours = int(groups[0]) if groups[0] else 0
-            minutes = int(groups[1])
+            minutes = float(groups[1])
             return float(hours * 60 + minutes)
 
         if len(groups) == 1 and groups[0]:
-            return float(int(groups[0]) * 60)
+            return float(groups[0]) * 60
 
     return None
 
