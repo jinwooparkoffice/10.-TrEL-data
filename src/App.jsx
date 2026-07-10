@@ -248,6 +248,7 @@ function App() {
   const [trelConfigOpen, setTrelConfigOpen] = useState(false)
   const [rShunt, setRShunt] = useState(100.0)  // 직렬 센서 저항 (Ω)
   const [rOsc, setROsc] = useState(50.0)       // 오실로스코프 내부 저항 (Ω)
+  const [deviceAreaMm2, setDeviceAreaMm2] = useState(4.3)  // 소자 유효 면적 (mm²)
   const [activeTab, setActiveTab] = useState('batch')  // 'batch' | 'analysis'
   const batchAbortRef = useRef(null)
   
@@ -362,6 +363,7 @@ function App() {
         }
         fd.append('r_shunt', rShunt)
         fd.append('r_osc', rOsc)
+        fd.append('device_area_mm2', deviceAreaMm2)
         const res = await fetch(apiUrl('/api/process-vil'), { method: 'POST', body: fd, signal })
         const data = await res.json()
         if (!data.success) throw new Error(data.error || 'VIL 처리 실패')
@@ -400,6 +402,7 @@ function App() {
           if (normEnd.trim()) fd.append('norm_end_ns', normEnd.trim())
           fd.append('r_shunt', rShunt)
           fd.append('r_osc', rOsc)
+          fd.append('device_area_mm2', deviceAreaMm2)
 
           const res = await fetch(apiUrl('/api/process-osc'), { method: 'POST', body: fd, signal })
           const data = await res.json().catch(() => ({}))
@@ -455,7 +458,16 @@ function App() {
         )
 
         if (selectedMasterEntries.length === 0) {
-          throw new Error('마스터 파일 생성에 사용할 TrEL 파일을 고르지 못했습니다. 파일명에 1min, 1h2min 같은 시간이 포함되어 있는지 확인해주세요.')
+          const failedOsc = oscResults.filter(r => !r.success)
+          const firstOscError = failedOsc[0]?.error
+          if (generatedTrelEntries.length === 0 && oscResults.length > 0) {
+            throw new Error(
+              firstOscError
+                ? `TrEL 처리에 모두 실패했습니다. 첫 번째 오류: ${firstOscError}`
+                : 'TrEL 처리에 성공한 파일이 없습니다. TrEL_processed에 _TrEL.csv가 생성됐는지 확인해주세요.',
+            )
+          }
+          throw new Error('마스터 파일 생성에 사용할 TrEL 파일이 없습니다. TrEL 처리 결과 또는 기존 _TrEL.csv 파일을 확인해주세요.')
         }
 
         // 마스터 파일 생성 전 백엔드 연결 확인 및 재시도
@@ -660,9 +672,20 @@ function App() {
                       {rTotal.toFixed(3)}
                     </div>
                   </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.85em', marginBottom: '4px' }}>소자 넓이 (mm²)</label>
+                    <input
+                      type="number"
+                      value={deviceAreaMm2}
+                      onChange={e => setDeviceAreaMm2(Number(e.target.value))}
+                      step={0.01}
+                      min={0.01}
+                      style={{ width: '120px', padding: '6px 8px' }}
+                    />
+                  </div>
                 </div>
                 <div style={{ marginTop: '8px', fontSize: '0.8em', color: '#666' }}>
-                  계산식: R_total = (R_shunt × R_osc) / (R_shunt + R_osc)
+                  계산식: R_total = (R_shunt × R_osc) / (R_shunt + R_osc). 전류 밀도 J = I / 면적(cm²)에 사용됩니다.
                 </div>
               </div>
               

@@ -4,11 +4,13 @@
 - 기본 회로 파라미터: R_shunt = 100Ω, R_osc = 50Ω
 - 사용자 지정 저항값이 주어지면 R_total = (R_shunt × R_osc) / (R_shunt + R_osc)
 """
+import math
 from typing import Optional
 
 
 # 기본값
 DEFAULT_R_SHUNT = 100.0  # Ω
+DEFAULT_DEVICE_AREA_MM2 = 4.3  # 소자 유효 면적 (mm²)
 DEFAULT_R_OSC = 50.0     # Ω
 DEFAULT_R_TOTAL = 33.333  # Ω
 
@@ -37,6 +39,19 @@ def calculate_r_total(r_shunt: Optional[float] = None, r_osc: Optional[float] = 
         raise ValueError("R_shunt와 R_osc는 양수여야 합니다.")
     
     return (r_shunt * r_osc) / (r_shunt + r_osc)
+
+
+def resolve_device_area_mm2(value: Optional[float]) -> float:
+    """API/폼에서 받은 소자 넓이(mm²). 무효하면 DEFAULT_DEVICE_AREA_MM2."""
+    if value is None:
+        return DEFAULT_DEVICE_AREA_MM2
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_DEVICE_AREA_MM2
+    if not math.isfinite(v) or v <= 0:
+        return DEFAULT_DEVICE_AREA_MM2
+    return v
 
 
 def calculate_device_voltage(

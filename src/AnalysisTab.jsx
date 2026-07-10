@@ -10,6 +10,8 @@ function RisePreviewChart({
   tRise,
   analysisMode,
   axisMode,
+  previewXMin,
+  previewXMax,
   tangentSlope,
   tangentIntercept,
 }) {
@@ -37,8 +39,12 @@ function RisePreviewChart({
       if (filtered.length === 0) return {}
 
       const tVals = filtered.map(({ t }) => t)
-      const xMinVal = axisMode === 'linear' ? 0 : Math.min(...tVals)
-      const xMaxVal = axisMode === 'linear' ? 100 : Math.max(...tVals)
+      const xMinVal = axisMode === 'linear'
+        ? (Number.isFinite(previewXMin) ? previewXMin : Math.min(...tVals))
+        : Math.min(...tVals)
+      const xMaxVal = axisMode === 'linear'
+        ? (Number.isFinite(previewXMax) ? previewXMax : Math.max(...tVals))
+        : Math.max(...tVals)
       const yVals = filtered.map(({ y }) => y)
       const validY = yVals.filter(y => Number.isFinite(y))
       const yMin = validY.length ? Math.min(...validY) : 0
@@ -106,9 +112,15 @@ function RisePreviewChart({
       let pathTangent = ''
       if (isTangentMode && Number.isFinite(tangentSlope) && Number.isFinite(tangentIntercept)) {
         const tangentTimes = []
+        const tangentStart = Number.isFinite(tDelay) && Number.isFinite(tSaturation)
+          ? Math.min(tDelay, tSaturation)
+          : xMinVal
+        const tangentEnd = Number.isFinite(tDelay) && Number.isFinite(tSaturation)
+          ? Math.max(tDelay, tSaturation)
+          : xMaxVal
         const sampleCount = 120
         for (let i = 0; i < sampleCount; i += 1) {
-          tangentTimes.push(xMinVal + ((xMaxVal - xMinVal) * i) / (sampleCount - 1))
+          tangentTimes.push(tangentStart + ((tangentEnd - tangentStart) * i) / (sampleCount - 1))
         }
 
         const tangentPts = tangentTimes
@@ -130,7 +142,7 @@ function RisePreviewChart({
       console.error('Rise Chart Error:', e)
       return {}
     }
-  }, [timeRaw, elSignal, axisMode, isTangentMode, tangentSlope, tangentIntercept])
+  }, [timeRaw, elSignal, axisMode, isTangentMode, previewXMin, previewXMax, tangentSlope, tangentIntercept, tDelay, tSaturation])
 
   if (!pathOrig) return (
     <div style={{ height: h, background: '#f5f5f5', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888' }}>
@@ -287,10 +299,12 @@ export default function AnalysisTab({ backendStatus }) {
   const [lowPct, setLowPct] = useState(0.1)
   const [highPct, setHighPct] = useState(99)
   const [nDecay, setNDecay] = useState(2)
-  const [decayFitStartUs, setDecayFitStartUs] = useState(0)
+  const [decayFitStartUs, setDecayFitStartUs] = useState(4)
+  const [tangentWindowPoints, setTangentWindowPoints] = useState(17)
   const [decayInitialParamsInput, setDecayInitialParamsInput] = useState('')
   const [previewSubTab, setPreviewSubTab] = useState('rise')  // 'rise' | 'decay'
   const [analysisPreview, setAnalysisPreview] = useState(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [analysisError, setAnalysisError] = useState(null)
   const [analysisProcessing, setAnalysisProcessing] = useState(false)
   const [analysisSelectingFolder, setAnalysisSelectingFolder] = useState(false)
@@ -313,6 +327,12 @@ export default function AnalysisTab({ backendStatus }) {
     }
   }
 
+  const sanitizeTangentWindowPoints = (value) => {
+    const parsed = Number.parseInt(String(value), 10)
+    if (!Number.isFinite(parsed)) return 17
+    return Math.max(3, parsed)
+  }
+
   const getDownloadFilename = (response, fallback) => {
     const disposition = response.headers.get('content-disposition') || ''
     const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
@@ -324,6 +344,7 @@ export default function AnalysisTab({ backendStatus }) {
 
   const loadAnalysisPreview = async (fileHandle, opts = {}) => {
     const { decayParams } = opts
+    const windowPoints = sanitizeTangentWindowPoints(tangentWindowPoints)
     const fd = new FormData()
     fd.append('file', await fileHandle.getFile())
     fd.append('rise_mode', riseMode)
@@ -331,16 +352,28 @@ export default function AnalysisTab({ backendStatus }) {
     fd.append('high_pct', highPct)
     fd.append('n_decay', nDecay)
     fd.append('decay_fit_start_us', decayFitStartUs)
+    fd.append('tangent_window_points', windowPoints)
     if (decayParams?.length) fd.append('decay_initial_params', JSON.stringify(decayParams))
 
-    const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
-    const data = await res.json()
+    setPreviewLoading(true)
+    try {
+      const res = await fetch(apiUrl('/api/trel-analysis-preview'), { method: 'POST', body: fd })
+      let data = null
+      try {
+        data = await res.json()
+      } catch {
+        throw new Error(`미리보기 응답을 읽을 수 없습니다. (HTTP ${res.status})`)
+      }
 
-    if (!data.success) {
-      throw new Error(data.error || '미리보기 로드 실패')
+      if (!res.ok || !data.success) {
+        throw new Error(data?.error || `미리보기 로드 실패 (HTTP ${res.status})`)
+      }
+
+      setAnalysisPreview(data)
+      setAnalysisError(null)
+    } finally {
+      setPreviewLoading(false)
     }
-
-    setAnalysisPreview(data)
   }
 
   const ensureReadWritePermission = async (dirHandle) => {
@@ -401,11 +434,10 @@ export default function AnalysisTab({ backendStatus }) {
   }
 
   const refreshPreview = (opts = {}) => {
-    if (!analysisFiles?.length) return
+    if (!analysisFiles?.length || previewLoading) return
     const idx = indexClosestTo10Min(analysisFiles)
     const decayParams = opts.decayParams ?? parseInitialParams(decayInitialParamsInput)
     loadAnalysisPreview(analysisFiles[idx].handle, { decayParams }).catch(err => {
-      setAnalysisPreview(null)
       setAnalysisError(err.message === 'Failed to fetch' ? '백엔드 연결 실패' : err.message)
     })
   }
@@ -458,6 +490,7 @@ export default function AnalysisTab({ backendStatus }) {
       fd.append('high_pct', highPct)
       fd.append('n_decay', nDecay)
       fd.append('decay_fit_start_us', decayFitStartUs)
+      fd.append('tangent_window_points', sanitizeTangentWindowPoints(tangentWindowPoints))
       if (analysisPreview?.decay_popt?.length) {
         fd.append('decay_initial_params', JSON.stringify(analysisPreview.decay_popt))
       }
@@ -565,13 +598,32 @@ export default function AnalysisTab({ backendStatus }) {
               />
               <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>기본값 4</span>
             </div>
+            {riseMode === 'tangent' && (
+              <div>
+                <label style={{ display: 'block', fontSize: '0.9em', marginBottom: '4px' }}>접선 윈도우 포인트 수</label>
+                <input
+                  type="number"
+                  value={tangentWindowPoints}
+                  onChange={e => {
+                    const next = Number(e.target.value)
+                    setTangentWindowPoints(Number.isFinite(next) ? next : 17)
+                  }}
+                  onBlur={() => setTangentWindowPoints(sanitizeTangentWindowPoints(tangentWindowPoints))}
+                  step={2}
+                  min={3}
+                  style={{ width: '90px', padding: '6px 8px' }}
+                />
+                <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '4px' }}>기본값 17 · 새로고침 필요</span>
+              </div>
+            )}
             <div>
               <button
                 type="button"
                 onClick={() => refreshPreview()}
+                disabled={previewLoading}
                 style={{ padding: '6px 12px', marginTop: '22px' }}
               >
-                미리보기 새로고침
+                {previewLoading ? '미리보기 로딩 중...' : '미리보기 새로고침'}
               </button>
             </div>
           </div>
@@ -605,12 +657,12 @@ export default function AnalysisTab({ backendStatus }) {
           </details>
           {riseMode === 'tangent' && (
             <p style={{ marginTop: '-8px', marginBottom: '16px', fontSize: '0.85em', color: '#666' }}>
-              Tangent 모드는 raw 데이터에 대해 약 17포인트 sliding window 선형 회귀로 최대 기울기 접선을 찾습니다. Low%/High% 값은 이 모드에서 사용되지 않습니다.
+              Tangent 모드는 노이즈를 줄인 뒤 설정한 포인트 수의 sliding window 선형 회귀로 상승 폭이 큰 접선을 찾습니다. 홀수 값을 권장합니다. 윈도우 포인트를 바꾼 뒤에는 미리보기 새로고침을 눌러주세요. Low%/High% 값은 이 모드에서 사용되지 않습니다.
             </p>
           )}
 
           {analysisPreview && (
-            <div style={{ marginBottom: '20px' }}>
+            <div style={{ marginBottom: '20px', opacity: previewLoading ? 0.55 : 1 }}>
               <h4 style={{ marginBottom: '8px' }}>
                 미리보기: {analysisPreview.filename}
                 {analysisPreview.rise?.analysis_mode && (
@@ -619,6 +671,16 @@ export default function AnalysisTab({ backendStatus }) {
                   </span>
                 )}
               </h4>
+              {riseMode === 'tangent' && analysisPreview.rise?.tangent_window_points != null && (
+                <p style={{ marginTop: '-4px', marginBottom: '8px', fontSize: '0.85em', color: '#666' }}>
+                  접선 윈도우: {analysisPreview.rise.tangent_window_points} points
+                </p>
+              )}
+              {analysisPreview.rise?.rise_error && (
+                <p style={{ marginTop: '-4px', marginBottom: '8px', fontSize: '0.85em', color: '#c62828' }}>
+                  Rise 분석 경고: {analysisPreview.rise.rise_error}
+                </p>
+              )}
               <div style={{ display: 'flex', gap: '4px', marginBottom: '12px', borderBottom: '1px solid #ddd' }}>
                 <button
                   type="button"
@@ -658,6 +720,8 @@ export default function AnalysisTab({ backendStatus }) {
                   tDelay={analysisPreview.rise.t_delay}
                   tRise={analysisPreview.rise.t_rise}
                   tSaturation={analysisPreview.rise.t_saturation}
+                  previewXMin={analysisPreview.rise.preview_x_min}
+                  previewXMax={analysisPreview.rise.preview_x_max}
                   tangentSlope={analysisPreview.rise.tangent_slope}
                   tangentIntercept={analysisPreview.rise.tangent_intercept}
                 />

@@ -7,7 +7,7 @@ TrEL (Transient Electroluminescence) 오실로스코프 데이터 처리
   - CH2: LED와 직렬 연결된 100Ω 저항 양단 전압
     - 오실로스코프 입력 임피던스 50Ω과 병렬 연결됨
     - R_TOTAL = (100 * 50) / (100 + 50) = 33.33Ω
-  - Area: 4.3 mm² (기본값)
+  - 소자 면적: 기본 4.3 mm² (device_area_mm2로 변경 가능)
 - 출력:
   - Time (μs): Raw Time (t=0 at Trigger/Voltage ON)
   - Shifted Time (μs): Decay Analysis Time (t=0 at Voltage OFF)
@@ -23,10 +23,7 @@ import pandas as pd
 import numpy as np
 
 # 실험 상수
-from utils.circuit_config import DEFAULT_R_SHUNT, DEFAULT_R_OSC, calculate_r_total
-
-DEVICE_AREA_MM2 = 4.3
-AREA_CM2 = DEVICE_AREA_MM2 * 1e-2  # 0.043 cm²
+from utils.circuit_config import calculate_r_total, resolve_device_area_mm2
 
 
 def parse_frequency_duty(filename: str) -> Tuple[Optional[float], Optional[float]]:
@@ -108,12 +105,15 @@ def process_osc_data(
     norm_end_ns: Optional[float] = None,
     r_shunt: Optional[float] = None,
     r_osc: Optional[float] = None,
+    device_area_mm2: Optional[float] = None,
 ) -> Tuple[str, Dict]:
     """
     오실로스코프 TrEL 데이터 처리 (Pandas Optimized)
     """
-    # R_total 계산
+    # R_total, 소자 면적 (mm² → cm²)
     r_total = calculate_r_total(r_shunt, r_osc)
+    area_mm2 = resolve_device_area_mm2(device_area_mm2)
+    area_cm2 = area_mm2 * 1e-2
     
     df = load_osc_csv(csv_content)
 
@@ -178,7 +178,7 @@ def process_osc_data(
     if np.any(mask_base):
         offset_ch2 = np.mean(ch2[mask_base])
         
-    j_raw = ((ch2 - offset_ch2) / r_total) / AREA_CM2 * 1000.0
+    j_raw = ((ch2 - offset_ch2) / r_total) / area_cm2 * 1000.0
 
     # 3. Time Shift Calculation
     # Trigger (t=0) is Voltage ON.
@@ -239,7 +239,8 @@ def process_osc_data(
         'r_total_ohm': r_total,
         'r_shunt_ohm': r_shunt,
         'r_osc_ohm': r_osc,
-        'area_cm2': AREA_CM2
+        'device_area_mm2': area_mm2,
+        'area_cm2': area_cm2,
     }
 
     return output.getvalue(), metadata

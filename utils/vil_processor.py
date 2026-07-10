@@ -11,9 +11,7 @@ import io
 from typing import Optional, Tuple, Dict
 import pandas as pd
 import numpy as np
-from utils.circuit_config import calculate_r_total, calculate_device_voltage
-
-DEVICE_AREA_MM2 = 4.3  # 소자 크기 (mm²)
+from utils.circuit_config import calculate_r_total, calculate_device_voltage, resolve_device_area_mm2
 TOLERANCE = 0.05  # 5% 허용 오차
 
 
@@ -48,7 +46,8 @@ def process_vil_data(
     target_current_ua: float,
     filename: str = "",
     r_shunt: Optional[float] = None,
-    r_osc: Optional[float] = None
+    r_osc: Optional[float] = None,
+    device_area_mm2: Optional[float] = None,
 ) -> Tuple[str, float, Dict]:
     """
     VIL CSV 데이터 처리 (Pandas Optimized)
@@ -145,8 +144,8 @@ def process_vil_data(
         raise ValueError("필터링 후 유효한 데이터가 없습니다.")
 
     # Current density: I(µA) -> mA/cm²
-    # 4.3 mm² = 4.3e-2 cm²
-    area_cm2 = DEVICE_AREA_MM2 * 1e-2  # 0.043 cm²
+    area_mm2 = resolve_device_area_mm2(device_area_mm2)
+    area_cm2 = area_mm2 * 1e-2
     j_ma_cm2 = (i_filtered / 1000.0) / area_cm2
 
     # Relative luminance: 최대값을 1로 정규화
@@ -194,7 +193,9 @@ def process_vil_data(
         'output_filename': output_filename,
         'r_total_ohm': r_total,
         'r_shunt_ohm': r_shunt,
-        'r_osc_ohm': r_osc
+        'r_osc_ohm': r_osc,
+        'device_area_mm2': area_mm2,
+        'area_cm2': area_cm2,
     }
 
     return output.getvalue(), time_shift, metadata

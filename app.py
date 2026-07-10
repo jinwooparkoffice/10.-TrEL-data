@@ -20,6 +20,7 @@ from utils.master_processor import process_master
 from utils.trel_common import parse_minutes_from_filename
 from utils.trel_analysis import (
     analyze_single_file,
+    DEFAULT_TANGENT_WINDOW_POINTS,
     format_rise_analysis_mode,
     get_preview_data as get_trel_preview,
     parse_after_duty_from_filename,
@@ -34,6 +35,14 @@ TREL_CACHE_TTL_SECONDS = 60 * 30
 PROCESSED_TREL_CACHE = {}
 PROCESSED_VIL_CACHE = {}
 TREL_BATCH_PROGRESS = {'active': False, 'current': 0, 'total': 0, 'filename': '', 'stage': ''}
+
+
+def parse_tangent_window_points(raw_value) -> int:
+    try:
+        value = int(float(raw_value))
+    except (TypeError, ValueError):
+        value = DEFAULT_TANGENT_WINDOW_POINTS
+    return max(3, value)
 
 
 def prune_cache(cache_store):
@@ -171,6 +180,9 @@ def process_vil():
         if not files:
             return jsonify({'success': False, 'error': '파일이 없습니다.'}), 400
 
+        _dam = request.form.get('device_area_mm2', '').strip()
+        device_area_mm2 = float(_dam) if _dam else None
+
         results = []
         processed_paths = set()
         for i, f in enumerate(files):
@@ -201,7 +213,9 @@ def process_vil():
                 r_osc = float(r_osc) if r_osc else None
                 
                 content = f.read().decode('utf-8', errors='replace')
-                csv_out, time_shift, meta = process_vil_data(content, target, filename, r_shunt, r_osc)
+                csv_out, time_shift, meta = process_vil_data(
+                    content, target, filename, r_shunt, r_osc, device_area_mm2=device_area_mm2
+                )
                 xlsx_bytes = csv_text_to_xlsx_bytes(csv_out)
                 results.append({
                     'filename': filename,
@@ -287,6 +301,9 @@ def process_osc():
         if not files:
             return jsonify({'success': False, 'error': 'CSV 파일이 없습니다.'}), 400
 
+        _dam = request.form.get('device_area_mm2', '').strip()
+        device_area_mm2 = float(_dam) if _dam else None
+
         results = []
         processed_paths = set()
         for i, f in enumerate(files):
@@ -327,6 +344,7 @@ def process_osc():
                     norm_end_ns=norm_end_ns,
                     r_shunt=r_shunt,
                     r_osc=r_osc,
+                    device_area_mm2=device_area_mm2,
                 )
                 results.append({
                     'filename': filename,
@@ -467,6 +485,9 @@ def trel_analysis_preview():
         n_decay = int(request.form.get('n_decay', 2))
         rise_mode = request.form.get('rise_mode', 'tangent')
         decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
+        tangent_window_points = parse_tangent_window_points(
+            request.form.get('tangent_window_points', DEFAULT_TANGENT_WINDOW_POINTS)
+        )
         decay_init_json = request.form.get('decay_initial_params')
         decay_initial_params = None
         if decay_init_json:
@@ -485,6 +506,7 @@ def trel_analysis_preview():
             rise_mode=rise_mode,
             decay_fit_start_us=decay_fit_start_us,
             decay_initial_params=decay_initial_params,
+            tangent_window_points=tangent_window_points,
         )
         if preview.get('error'):
             return jsonify({'success': False, 'error': preview['error']}), 400
@@ -520,6 +542,9 @@ def trel_analysis_batch():
         n_decay = int(request.form.get('n_decay', 2))
         rise_mode = request.form.get('rise_mode', 'tangent')
         decay_fit_start_us = float(request.form.get('decay_fit_start_us', 0.0))
+        tangent_window_points = parse_tangent_window_points(
+            request.form.get('tangent_window_points', DEFAULT_TANGENT_WINDOW_POINTS)
+        )
 
         if not files:
             return jsonify({'success': False, 'error': 'CSV 파일이 없습니다.'}), 400
@@ -589,6 +614,7 @@ def trel_analysis_batch():
                 vil_time_voltage=vil_time_voltage_lum if vil_time_voltage_lum else None,
                 decay_fit_start_us=decay_fit_start_us,
                 decay_initial_params=decay_init,
+                tangent_window_points=tangent_window_points,
             )
 
         def _set_progress(cur, fn, stage):

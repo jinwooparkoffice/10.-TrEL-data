@@ -18,6 +18,8 @@ from scipy.optimize import least_squares
 
 from utils.trel_common import parse_minutes_from_filename, parse_trel_csv_frame
 
+_trapz = np.trapezoid if hasattr(np, 'trapezoid') else np.trapz
+
 DEFAULT_RISE_ANALYSIS_MODE = 'tangent'
 DEFAULT_TANGENT_WINDOW_POINTS = 17
 VALID_RISE_ANALYSIS_MODES = {'threshold', 'tangent'}
@@ -261,6 +263,20 @@ def analyze_rise_threshold(
         return {'t_delay': None, 't_rise': None, 't_saturation': None, 'error': '분석 중 오류'}
 
 
+def _smooth_moving_average(values: np.ndarray, window_size: int) -> np.ndarray:
+    """접선 탐색용 이동 평균. 노이즈에 민감한 최대 기울기 선택을 완화한다."""
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 3:
+        return arr
+
+    window_size = int(max(3, min(window_size, len(arr))))
+    if window_size % 2 == 0:
+        window_size += 1
+
+    kernel = np.ones(window_size, dtype=float) / window_size
+    return np.convolve(arr, kernel, mode='same')
+
+
 def analyze_rise_tangent(
     time_raw: np.ndarray,
     time_shifted: np.ndarray,
@@ -269,8 +285,8 @@ def analyze_rise_tangent(
 ) -> Dict:
     """
     Single Tangent Method
-    - 전체 smoothing 없이 raw 데이터를 유지
-    - sliding window 선형 회귀로 최대 상승 기울기(m)와 절편(b)를 찾음
+    - raw 데이터를 가볍게 평활화한 뒤 sliding window 선형 회귀로 상승 접선을 찾음
+    - 노이즈 spike만 최대 기울기로 선택되지 않도록 상승 폭이 큰 구간을 우선함
     - t_delay = -b/m, t_saturation = (1-b)/m, t_rise = t_saturation - t_delay
     """
     mask = time_shifted <= 0
@@ -295,15 +311,20 @@ def analyze_rise_tangent(
     if window_points < 3:
         return {'t_delay': None, 't_rise': None, 't_saturation': None, 'error': '윈도우 데이터 부족'}
 
+    smooth_window = int(max(window_points, min(15, len(t_r) // 20 * 2 + 1)))
+    y_smooth = _smooth_moving_average(y_r, smooth_window)
+
     preferred_candidates = []
     fallback_candidates = []
 
     for start in range(0, len(t_r) - window_points + 1):
         end = start + window_points
         win_t = t_r[start:end]
-        win_y = y_r[start:end]
+        win_y = y_smooth[start:end]
 
         if np.ptp(win_t) <= 1e-12:
+            continue
+        if win_y[-1] <= win_y[0] + 0.01:
             continue
 
         try:
@@ -314,7 +335,10 @@ def analyze_rise_tangent(
         if not np.isfinite(slope) or not np.isfinite(intercept) or slope <= 0:
             continue
 
+        rise_span = float(np.ptp(win_y))
+        score = float(slope * rise_span)
         candidate = {
+            'score': score,
             'slope': float(slope),
             'intercept': float(intercept),
             'window_start': float(win_t[0]),
@@ -330,7 +354,7 @@ def analyze_rise_tangent(
     if not candidates:
         return {'t_delay': None, 't_rise': None, 't_saturation': None, 'error': '유효한 접선 구간 없음'}
 
-    best = max(candidates, key=lambda item: item['slope'])
+    best = max(candidates, key=lambda item: item['score'])
     slope = best['slope']
     intercept = best['intercept']
 
@@ -645,7 +669,7 @@ def analyze_negative_spike(
     if not np.any(spike_signal > 0):
         return {'error': 'Negative spike 신호 없음'}
 
-    integral = float(np.trapz(spike_signal, t_spike))
+    integral = float(_trapz(spike_signal, t_spike))
     decay_time = _negative_spike_decay_time_1e(t_spike, spike_signal)
     idx_peak = int(np.argmax(spike_signal))
     peak_time_us = float(t_spike[idx_peak])
@@ -696,6 +720,7 @@ def analyze_single_file(
     vil_time_voltage: Optional[List[Tuple[float, float]]] = None,
     decay_fit_start_us: float = 0.0,
     decay_initial_params: Optional[List[float]] = None,
+    tangent_window_points: int = DEFAULT_TANGENT_WINDOW_POINTS,
 ) -> Dict:
     """
     단일 파일 분석 메인 함수
@@ -714,7 +739,7 @@ def analyze_single_file(
         low_pct,
         high_pct,
         rise_mode=normalized_rise_mode,
-        tangent_window_points=DEFAULT_TANGENT_WINDOW_POINTS,
+        tangent_window_points=tangent_window_points,
     )
     
     # 2. Decay Analysis (Using time_shifted)
@@ -793,6 +818,7 @@ def get_preview_data(
     rise_mode: str = DEFAULT_RISE_ANALYSIS_MODE,
     decay_fit_start_us: float = 0.0,
     decay_initial_params: Optional[List[float]] = None,
+    tangent_window_points: int = DEFAULT_TANGENT_WINDOW_POINTS,
 ) -> Dict:
     """미리보기용 데이터 생성 (피팅 없이 신호 + integral + decay_time만)"""
     time_raw, time_shifted, el_signal, current_density, _ = parse_trel_csv(content)
@@ -807,7 +833,7 @@ def get_preview_data(
         low_pct,
         high_pct,
         rise_mode=normalized_rise_mode,
-        tangent_window_points=DEFAULT_TANGENT_WINDOW_POINTS,
+        tangent_window_points=tangent_window_points,
     )
     fit_start = max(float(decay_fit_start_us), 0.0)
     popt, tau_avg, y_fit, _ = fit_decay(
@@ -816,15 +842,28 @@ def get_preview_data(
     )
     # Preview Data Construction
     # 1. Rise Preview
-    # Threshold: 기존처럼 trigger 이후 0~100us 중심 미리보기
-    # Tangent: 접선 및 교차점을 보기 위해 rise 전체 구간을 선형 축으로 전달
-    mask_rise = (time_raw >= 0.0) & (time_raw <= 100.0)
+    # Threshold: trigger 이후 0~100us 중심 미리보기
+    # Tangent: t_delay/t_saturation 주변으로 확대해 접선과 신호를 함께 표시
+    if normalized_rise_mode == 'tangent':
+        t_delay = rise_res.get('t_delay')
+        t_saturation = rise_res.get('t_saturation')
+        if t_delay is not None and t_saturation is not None:
+            span = abs(float(t_saturation) - float(t_delay))
+            margin = max(5.0, span * 0.35)
+            preview_min = min(float(t_delay), float(t_saturation)) - margin
+            preview_max = max(float(t_delay), float(t_saturation)) + margin
+        else:
+            preview_min, preview_max = 0.0, 100.0
+        mask_rise = (time_raw >= preview_min) & (time_raw <= preview_max)
+    else:
+        preview_min, preview_max = 0.0, 100.0
+        mask_rise = (time_raw >= preview_min) & (time_raw <= preview_max)
     t_rise_preview = time_raw[mask_rise]
     y_rise_preview = el_signal[mask_rise]
     
     # Downsample
     if len(t_rise_preview) > 1500:
-        step = len(t_rise_preview) // 1500
+        step = max(1, (len(t_rise_preview) + 1499) // 1500)
         t_rise_preview = t_rise_preview[::step]
         y_rise_preview = y_rise_preview[::step]
 
@@ -835,6 +874,8 @@ def get_preview_data(
     rise_data = {
         'analysis_mode': rise_res.get('rise_mode', format_rise_analysis_mode(normalized_rise_mode)),
         'axis_mode': 'linear' if normalized_rise_mode == 'tangent' else 'log',
+        'preview_x_min': float(preview_min),
+        'preview_x_max': float(preview_max),
         'time_raw': safe_list(t_rise_preview),
         'el_signal_rise': safe_list(y_rise_preview),
         't_delay': float(rise_res.get('t_delay')) if rise_res.get('t_delay') is not None else None,
@@ -844,6 +885,8 @@ def get_preview_data(
         'tangent_intercept': float(rise_res.get('tangent_intercept')) if rise_res.get('tangent_intercept') is not None else None,
         'tangent_window_start': float(rise_res.get('tangent_window_start')) if rise_res.get('tangent_window_start') is not None else None,
         'tangent_window_end': float(rise_res.get('tangent_window_end')) if rise_res.get('tangent_window_end') is not None else None,
+        'tangent_window_points': int(rise_res.get('tangent_window_points')) if rise_res.get('tangent_window_points') is not None else None,
+        'rise_error': rise_res.get('error'),
     }
 
     # 2. Decay Preview: time_shifted 0 ~ 50us (Log Y Scale on Frontend)
@@ -860,7 +903,7 @@ def get_preview_data(
     
     # Downsample
     if len(t_decay_preview) > 1500:
-        step = len(t_decay_preview) // 1500
+        step = max(1, (len(t_decay_preview) + 1499) // 1500)
         t_decay_preview = t_decay_preview[::step]
         if len(y_decay_log) > 0:
             y_decay_log = y_decay_log[::step]
@@ -880,7 +923,7 @@ def get_preview_data(
         
         # Downsample fit as well
         if len(t_fit_preview) > 1500:
-            step = len(t_fit_preview) // 1500
+            step = max(1, (len(t_fit_preview) + 1499) // 1500)
             t_fit_preview = t_fit_preview[::step]
             y_fit_log = y_fit_log[::step]
             
